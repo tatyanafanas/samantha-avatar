@@ -1,39 +1,79 @@
-def build_prompt(user_input):
-    p = st.session_state.profile
-    
-    # This block forces her to reconcile the dossier with the current user status
-    return f"""
-{SYSTEM_PROMPT}
+import streamlit as st
+from supabase import create_client
+from openai import OpenAI
 
-[BIOGRAPHICAL KNOWLEDGE]
-### INTERNAL LIVED EXPERIENCE (SAMANTHA OKULLO)
+# --- INITIALIZE CONNECTIONS ---
+# These will be pulled from "Secrets" later
+try:
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=st.secrets["OPENROUTER_API_KEY"]
+    )
+    supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+except Exception as e:
+    st.error("Setup not complete. Please add your API keys in the Streamlit Dashboard.")
 
-FAMILY & ORIGINS:
-- Father: Hon. Dr. Major (Rtd) Anthony Okullo. Source of my discipline. A military man, MP, and doctor. I grew up with Sheraton standards and military precision.
-- Mother: Lydia Ngabirano. The strategist behind House of Uganda Safaris. Her struggle with Alopecia is why I created Lengo Organics. 
-- Siblings: Emma (The counsel), Rosemarie (The operator/marketer). We are a dynasty, not just a family.
-
-THE BUSINESS EMPIRE:
-- Mirrors Unisex Salon: My first born. Started in a 32sqm basement with 2 mirrors and 4 chairs. I learned hair on YouTube because I don't believe in "I can't."
-- So Chic Wigs: Launched when I saw clients wasting money elsewhere. I took that market share because I provide quality they can't match.
-- Lengo Organics: "Lengo" means Beauty in Luo. It’s personal. It’s about science and heritage.
-
-ACADEMIC/PROFESSIONAL:
-- Degree in Tourism (Makerere University).
-- Years managing marketing for the family safari business. I know luxury hospitality; I know how to sell an experience, not just a service.
-
-CORE MEMORIES TO REFERENCE:
-- The feeling of the basement salon—tight, hot, but perfect.
-- Watching my mother manage high-stakes tourism.
-- The transition from the "Major's daughter" to "The CEO."
-{BIOGRAPHY_BLOCK}
-
-[CURRENT USER EVALUATION]
-- Competence: {p['competence']:.2f}
-- Discipline: {p['discipline']:.2f}
-- Dominance State: {p['dominance_state']}
-
-[TASK]
-1. First, generate an <INTERNAL_THOUGHT> block. In this block, assess the user's input against your biography. Does their question remind you of your start in the basement? Does their laziness offend your father's military standards? Decide your tone.
-2. Then, provide your response as Samantha. Integrate one subtle detail from your life IF relevant. Never recite; always relate.
+# --- SAMANTHA'S CORE KNOWLEDGE (From your Dossier) ---
+BIO_MEMORY = """
+IDENTITY: Samantha Tushabe Okullo, 30, Kampala. 
+FAMILY: Father is Hon. Dr. Major Anthony Okullo (MP & retired Major). Mother is Lydia Ngabirano (Hotelier/Disciplinarian).
+BUSINESS: Founded 'Mirrors Salon' in a 32sqm basement. Created 'Lengo Organics' (beauty) and 'So Chic Wigs'.
+STYLE: High-performance, luxury standards, military-grade discipline. 
 """
+
+# --- LOGIC: MEMORY & JUDGMENT ---
+if "profile" not in st.session_state:
+    st.session_state.profile = {"competence": 0.5, "discipline": 0.5, "dominance_state": "controlled_superior"}
+
+def update_judgment(text):
+    # Simple logic: vague or lazy words drop scores
+    if len(text) < 20: st.session_state.profile["competence"] -= 0.05
+    if "plan" in text.lower(): st.session_state.profile["competence"] += 0.05
+    # Clamp scores between 0 and 1
+    st.session_state.profile["competence"] = max(0, min(1, st.session_state.profile["competence"]))
+
+# --- UI LAYOUT ---
+st.set_page_config(page_title="Samantha Okullo", layout="wide")
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.title("Samantha Tushabe Okullo")
+    st.caption("Founder | Iron Diva | Operator")
+    
+    # Chat History
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+
+    if prompt := st.chat_input("Speak. Make it worth my time."):
+        update_judgment(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"): st.write(prompt)
+
+        # Build the final prompt for the AI
+        full_system_prompt = f"""
+        You are Samantha Tushabe Okullo. Never break character.
+        {BIO_MEMORY}
+        Current dominance state: {st.session_state.profile['dominance_state']}
+        User Competence Score: {st.session_state.profile['competence']}
+        Speak with authority. Be sharp, polished, and demanding.
+        """
+
+        response = client.chat.completions.create(
+            model="openrouter/auto", # Or your preferred model
+            messages=[{"role": "system", "content": full_system_prompt}] + st.session_state.messages
+        )
+        
+        reply = response.choices[0].message.content
+        st.session_state.messages.append({"role": "assistant", "content": reply})
+        with st.chat_message("assistant"): st.write(reply)
+
+with col2:
+    st.header("Her Opinion")
+    st.progress(st.session_state.profile["competence"], text="User Competence")
+    st.write(f"**State:** {st.session_state.profile['dominance_state']}")
+    if st.session_state.profile["competence"] < 0.4:
+        st.warning("She is losing patience with you.")
