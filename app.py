@@ -7,9 +7,9 @@ from openai import OpenAI
 try:
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key=st.secrets["OPENROUTER_API_KEY"]
+        api_key=st.secrets["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"]
     )
-    supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    supabase = create_client(st.secrets["https://bagetrmywxzesaicnnmy.supabase.co"], st.secrets["sb_publishable_G6lZx17tw4Bri8TLPPzr4Q_QgldoQXv"])
 except Exception as e:
     st.error("Setup not complete. Please add your API keys in the Streamlit Dashboard.")
 
