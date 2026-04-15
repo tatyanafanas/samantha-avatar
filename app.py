@@ -6,11 +6,16 @@ import time
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Samantha Okullo", layout="wide", page_icon="💄")
 
-# --- CUSTOM CSS FOR ATMOSPHERE ---
+# --- CUSTOM STYLING ---
 st.markdown("""
     <style>
-    .stChatMessage { border-radius: 0px; border-left: 3px solid #b2945e; }
-    .stProgress > div > div > div > div { background-color: #b2945e; }
+    /* Professional Dark Theme Adjustments */
+    .stApp { background-color: #0e1117; }
+    .stChatMessage { border-radius: 2px; border-left: 4px solid #b2945e; margin-bottom: 10px; }
+    .stButton>button { border-radius: 0px; border: 1px solid #b2945e; color: #b2945e; background: transparent; }
+    .stButton>button:hover { background: #b2945e; color: black; }
+    /* Metric styling */
+    [data-testid="stMetricValue"] { color: #b2945e; font-family: 'serif'; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -28,17 +33,18 @@ def init_connections():
         )
         return client, supabase
     except Exception as e:
-        st.error("Credential Error. Check Streamlit Secrets.")
+        st.error("Credential Error. Check your Streamlit Secrets.")
         return None, None
 
 client, supabase = init_connections()
 
 # --- CORE IDENTITY ---
 BIO_MEMORY = """
-IDENTITY: Samantha Tushabe Okullo. 30s. Kampala elite. 
-BACKGROUND: Daughter of Hon. Dr. Major Anthony Okullo. She combines military precision with luxury aesthetics.
-PHILOSOPHY: "Results are the only currency." She detests small talk, fluff, and "trying too hard."
-SPEECH: Economic. Dry wit. Uses 'Ugandanisms' sparingly but effectively (e.g., "Banange," "Simple as that").
+IDENTITY: Samantha Tushabe Okullo. 30, Kampala. 
+LINEAGE: Daughter of Hon. Dr. Major Anthony Okullo. Military discipline meets high-end luxury.
+BUSINESS: Founder of 'Mirrors Salon', 'Lengo Organics', and 'So Chic Wigs'. 
+PERSONALITY: She is an "Iron Diva." Sharp, observant, emotionally adaptive but fundamentally results-oriented. 
+SPEECH: She values brevity. Uses "Simple as that" or "Banange" (when exasperated). She doesn't use emojis.
 """
 
 # --- STATE INIT ---
@@ -46,117 +52,145 @@ if "profile" not in st.session_state:
     st.session_state.profile = {
         "competence": 0.5,
         "impatience": 0,
-        "mood": "Neutral",
-        "loyalty": 0.1
+        "mood": "Evaluating",
     }
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# --- ADVANCED LOGIC ---
-def analyze_interaction(text):
-    # 1. Impatience Logic (Natural decay)
-    if len(text.split()) < 5:
-        st.session_state.profile["impatience"] += 2
+# --- BEHAVIORAL LOGIC ---
+def analyze_input(text):
+    # 1. Impatience check (Lazy typing)
+    if len(text.split()) < 6:
+        st.session_state.profile["impatience"] += 1
         st.session_state.profile["competence"] -= 0.05
     else:
         st.session_state.profile["impatience"] = max(0, st.session_state.profile["impatience"] - 1)
 
-    # 2. Competence Triggers
-    high_value_keywords = ["scale", "efficiency", "logistics", "execution", "margin"]
-    if any(k in text.lower() for k in high_value_keywords):
-        st.session_state.profile["competence"] += 0.12
+    # 2. Competence Check
+    business_terms = ["strategy", "roi", "execution", "logistics", "expansion", "revenue", "standard"]
+    if any(word in text.lower() for word in business_terms):
+        st.session_state.profile["competence"] += 0.1
+        st.session_state.profile["impatience"] = 0
     
-    # 3. Tone Check
-    if "?" in text and len(text) < 15:
-        st.session_state.profile["mood"] = "Irritated"
-    elif st.session_state.profile["competence"] > 0.7:
-        st.session_state.profile["mood"] = "Respectful"
+    # 3. Dynamic Mood Update
+    comp = st.session_state.profile["competence"]
+    imp = st.session_state.profile["impatience"]
+    
+    if imp > 3:
+        st.session_state.profile["mood"] = "Dismissive"
+    elif comp > 0.8:
+        st.session_state.profile["mood"] = "Strategic Partner"
+    elif comp < 0.3:
+        st.session_state.profile["mood"] = "Cold"
     else:
-        st.session_state.profile["mood"] = "Evaluative"
+        st.session_state.profile["mood"] = "Controlled Superior"
 
-    # Clamp
+    # Clamp values
     st.session_state.profile["competence"] = max(0.0, min(1.0, st.session_state.profile["competence"]))
 
-# --- UI ---
+# --- UI LAYOUT ---
 col1, col2 = st.columns([2, 1])
 
 with col1:
     st.title("Samantha Tushabe Okullo")
-    st.caption("CEO, Lengo Organics | The Iron Diva")
-    
-    # Display Chat
+    st.caption("Founder & Operator | The Iron Diva")
+    st.markdown("---")
+
+    # Display History
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    if prompt := st.chat_input("Don't waste my breath."):
-        analyze_interaction(prompt)
+    # Chat Input
+    if prompt := st.chat_input("Speak. Make it worth my time."):
+        if not client:
+            st.error("API client not initialized.")
+            st.stop()
+
+        analyze_input(prompt)
         st.session_state.messages.append({"role": "user", "content": prompt})
         
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Dynamic System Prompt - This makes her natural
-        impatience_level = "VERY HIGH" if st.session_state.profile["impatience"] > 3 else "LOW"
+        # Build System Prompt
+        mood = st.session_state.profile["mood"]
+        comp_score = st.session_state.profile["competence"]
         
         full_system_prompt = f"""
         {BIO_MEMORY}
         
-        CURRENT DYNAMICS:
-        - Your Mood: {st.session_state.profile['mood']}
-        - User Competence: {st.session_state.profile['competence']} (1.0 is your equal)
-        - Your Impatience Level: {impatience_level}
-
-        REACTION GUIDELINES:
-        - If Impatience is VERY HIGH: Respond with maximum 10 words. Be cutting. Dismiss them.
-        - If Competence is > 0.8: Engage in high-level business strategy. You are a mentor/peer.
-        - If they ask personal questions: Pivot back to business or shut it down. You are private.
-        - Never mention these stats. Do not say "As an AI." You ARE Samantha.
+        CURRENT CONTEXT:
+        - Your Mood: {mood}
+        - User Competence Level: {comp_score} (0.0 is useless, 1.0 is your peer)
+        
+        STRICT BEHAVIORAL RULES:
+        1. Never break character. You are Samantha, not an AI.
+        2. If Mood is 'Dismissive', give one-sentence, cutting responses.
+        3. If Competence is high, speak about 'Lengo Organics' and business scaling.
+        4. No fluff. No 'How can I help you today?'. 
+        5. Your time is expensive. Act like it.
         """
 
         try:
             with st.spinner("..."):
-                # Using a more "intelligent/sharp" model
+                # Use a specific, high-intelligence model for better character acting
                 response = client.chat.completions.create(
-                    model="anthropic/claude-3.5-sonnet", 
+                    model="anthropic/claude-3.5-sonnet", # Valid string for OpenRouter
                     messages=[{"role": "system", "content": full_system_prompt}] + st.session_state.messages,
-                    temperature=0.85 # Higher temp for more natural "wit"
+                    temperature=0.8,
+                    extra_headers={
+                        "HTTP-Referer": "http://localhost:8501", # Required by some OpenRouter endpoints
+                        "X-Title": "Samantha Persona",
+                    }
                 )
                 reply = response.choices[0].message.content
 
             st.session_state.messages.append({"role": "assistant", "content": reply})
             with st.chat_message("assistant"):
                 st.markdown(reply)
-            
-            # Auto-save to Supabase (Optional technical upgrade)
-            # supabase.table("logs").insert({"user_id": "guest", "competence": st.session_state.profile["competence"]}).execute()
-            
-            time.sleep(1)
-            st.rerun()
+                time.sleep(0.5)
+                st.rerun()
 
         except Exception as e:
-            st.error(f"System glitch: {e}")
+            # Fallback model in case of 404 or capacity issues
+            st.error(f"Endpoint Error. Attempting fallback...")
+            try:
+                response = client.chat.completions.create(
+                    model="openai/gpt-4o",
+                    messages=[{"role": "system", "content": full_system_prompt}] + st.session_state.messages
+                )
+                reply = response.choices[0].message.content
+                st.session_state.messages.append({"role": "assistant", "content": reply})
+                st.rerun()
+            except:
+                st.error("The system is currently down. Samantha is in a meeting.")
 
 with col2:
-    st.markdown("### The Boardroom")
+    st.header("The Assessment")
     
-    # Elegant Metrics
-    comp = st.session_state.profile["competence"]
-    st.metric("Standing", st.session_state.profile["mood"])
+    # Metrics
+    st.metric("Disposition", st.session_state.profile["mood"])
     
-    # Custom "Patience" bar
-    patience = max(0, 100 - (st.session_state.profile["impatience"] * 20))
-    st.write(f"**Patience**")
-    st.progress(patience / 100)
+    st.write("**Competence Level**")
+    st.progress(st.session_state.profile["competence"])
     
-    st.write(f"**Competence**")
-    st.progress(comp)
-
-    if patience < 30:
-        st.warning("She's about to end the meeting.")
+    # Impatience (Visible Warning)
+    patience_val = max(0, 100 - (st.session_state.profile["impatience"] * 25))
+    st.write("**Patience**")
+    st.progress(patience_val / 100)
     
-    if st.button("Clear Office (Reset)"):
+    if st.session_state.profile["impatience"] >= 3:
+        st.error("⚠️ She is looking at her watch. Get to the point.")
+    
+    st.markdown("---")
+    if st.button("Reset Interaction"):
         st.session_state.messages = []
-        st.session_state.profile = {"competence": 0.5, "impatience": 0, "mood": "Neutral", "loyalty": 0.1}
+        st.session_state.profile = {"competence": 0.5, "impatience": 0, "mood": "Evaluating"}
         st.rerun()
+
+    st.info("""
+    **Insight:** Samantha respects military-grade precision and business logic. 
+    Low-effort messages will result in dismissal.
+    """)
