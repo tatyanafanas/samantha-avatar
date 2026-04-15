@@ -3,12 +3,14 @@ from supabase import create_client
 from openai import OpenAI
 import time
 import uuid
+import random 
 
 # --- IMPORT MODULAR COMPONENTS ---
 from persona.samantha import BIO_MEMORY, TRAITS
 from engine.dynamics import analyze_interaction
 from engine.prompt_builder import build_system_prompt
 from engine.memory import get_memory, save_memory, summarize_conversation
+from persona.samantha import STYLES
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="The Iron Diva", layout="wide", page_icon="🥀")
@@ -116,13 +118,30 @@ with col1:
             supabase,
             st.session_state.session_id
         )
-
+        # --- STYLE SELECTION (ADD HERE) ---
+        STYLE_NAMES = list(STYLES.keys())
+        
+        if "last_style" not in st.session_state:
+            st.session_state.last_style = None
+        
+        available_styles = [s for s in STYLE_NAMES if s != st.session_state.last_style]
+        current_style = random.choice(available_styles)
+        
+        st.session_state.last_style = current_style
+        style_data = STYLES[current_style]
         # --- BUILD SYSTEM PROMPT ---
         system_prompt = build_system_prompt(
             BIO_MEMORY,
             TRAITS,
             st.session_state.profile,
             memory
+        ) + f"""
+
+        CURRENT STYLE: {current_style}
+        STYLE DESCRIPTION: {style_data['description']}
+        STYLE RULES:
+        {chr(10).join(f"- {r}" for r in style_data['rules'])}
+        """
         ) + f"\n\nCURRENT OBJECTIVE: {st.session_state.profile['goal']}"
 
         # --- MODEL CALL ---
