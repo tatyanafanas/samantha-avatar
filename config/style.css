@@ -1,0 +1,8 @@
+.stApp { background-color: #080808; color: #d4af37; }
+
+.stChatMessage {
+    border-radius: 0px;
+    border-right: 4px solid #8b0000;
+    background-color: #121212;
+    font-family: 'Garamond', serif;
+}
