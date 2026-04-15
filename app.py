@@ -130,19 +130,23 @@ with col1:
         st.session_state.last_style = current_style
         style_data = STYLES[current_style]
         # --- BUILD SYSTEM PROMPT ---
-        system_prompt = build_system_prompt(
-            BIO_MEMORY,
-            TRAITS,
-            st.session_state.profile,
-            memory
-        ) + f"""
-
+        system_prompt = (
+            build_system_prompt(
+                BIO_MEMORY,
+                TRAITS,
+                st.session_state.profile,
+                memory
+            )
+            + f"""
+        
         CURRENT STYLE: {current_style}
         STYLE DESCRIPTION: {style_data['description']}
         STYLE RULES:
         {chr(10).join(f"- {r}" for r in style_data['rules'])}
+        
+        CURRENT OBJECTIVE: {st.session_state.profile['goal']}
         """
-        ) + f"\n\nCURRENT OBJECTIVE: {st.session_state.profile['goal']}"
+        )
 
         # --- MODEL CALL ---
         try:
