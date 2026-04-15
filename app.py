@@ -142,7 +142,7 @@ with col1:
         STYLE RULES:
         {chr(10).join(f"- {r}" for r in style_data['rules'])}
         """
-        ) + f"\n\nCURRENT OBJECTIVE: {st.session_state.profile['goal']}"
+         + f"\n\nCURRENT OBJECTIVE: {st.session_state.profile['goal']}"
 
         # --- MODEL CALL ---
         try:
