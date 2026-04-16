@@ -154,47 +154,73 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
             m for m in st.session_state.messages
             if m["role"] in ("user", "assistant") and m["content"].strip()
         ]
+MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-70b-versatile",
+    "llama-3.1-8b-instant",
+    "gemma2-9b-it"
+]
 
+def call_with_fallback(client, system_prompt, clean_messages):
+    for model in MODELS:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt}
+                ] + clean_messages,
+                temperature=0.85
+            )
+            return response.choices[0].message.content, model
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(x in error_str for x in ["rate limit", "429", "quota", "exceeded"]):
+                continue  # try next model
+            else:
+                raise  # non-rate-limit error, don't swallow it
+    raise Exception("All models exhausted.")
+
+    
         # --- MODEL CALL ---
         try:
-            with st.spinner("Miss Samantha is judging your aura..."):
-                response = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=[
-                        {"role": "system", "content": system_prompt}
-                    ] + clean_messages,
-                    temperature=0.85
-                )
+    with st.spinner("Miss Samantha is judging your aura..."):
+        reply, model_used = call_with_fallback(
+            client,
+            system_prompt,
+            clean_messages
+        )
 
-                reply = response.choices[0].message.content
+    # Optional: show which model responded (remove if you don't want this)
+    if model_used != "llama-3.3-70b-versatile":
+        st.caption(f"_(running on fallback: {model_used})_")
 
-            # --- STORE ASSISTANT REPLY ---
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": reply
-            })
+    # --- STORE ASSISTANT REPLY ---
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": reply
+    })
 
-            with st.chat_message("assistant"):
-                st.markdown(reply)
+    with st.chat_message("assistant"):
+        st.markdown(reply)
 
-            # --- PERIODIC MEMORY UPDATE ---
-            if len(st.session_state.messages) % 3 == 0:
-                summary = summarize_conversation(
-                    client,
-                    st.session_state.messages
-                )
-                if summary:
-                    save_memory(
-                        supabase,
-                        st.session_state.session_id,
-                        summary
-                    )
+    # --- PERIODIC MEMORY UPDATE ---
+    if len(st.session_state.messages) % 3 == 0:
+        summary = summarize_conversation(
+            client,
+            st.session_state.messages
+        )
+        if summary:
+            save_memory(
+                supabase,
+                st.session_state.session_id,
+                summary
+            )
 
-            time.sleep(0.1)
-            st.rerun()
+    time.sleep(0.1)
+    st.rerun()
 
-        except Exception as e:
-            st.error(f"Connection lost: {e}")
+except Exception as e:
+    st.error(f"Connection lost: {e}")
 
 # =======================
 # RIGHT: PROFILE PANEL
