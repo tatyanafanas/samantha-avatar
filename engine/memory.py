@@ -131,12 +131,12 @@ Omit keys entirely if unknown. No arrays. Be terse.
 """
 
 
-def summarize_conversation(client, messages: list) -> dict | None:
-    """
-    Ask the LLM to produce a structured profile dict from recent messages.
-    Returns a partial dict or None on failure.
-    """
-    import json
+summary_prompt = """
+Summarize this conversation in 5-6 plain sentences about the USER ONLY.
+Do NOT reproduce dialogue. Do NOT use roleplay tags.
+Focus on: user personality, what they revealed, power dynamic observed.
+Output plain prose only.
+"""
 
     try:
         response = client.chat.completions.create(
