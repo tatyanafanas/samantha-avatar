@@ -2,6 +2,7 @@ import streamlit as st
 import uuid
 import random
 import time
+from supabase import create_client
 
 from openai import OpenAI
 
@@ -20,6 +21,12 @@ HF_API_KEY = st.secrets.get("HF_API_KEY", "")
 
 OPENROUTER_MODEL = "openrouter/mistral-7b-instruct:free"
 HF_MODEL = "HuggingFaceH4/zephyr-7b-beta:featherless-ai"
+
+supabase = create_client(
+    st.secrets["SUPABASE_URL"],
+    st.secrets["SUPABASE_KEY"]
+)
+
 
 # =========================
 # CLIENTS
@@ -136,7 +143,10 @@ with col1:
         })
 
         # --- memory ---
-        memory = get_memory(st.session_state.session_id)
+        memory = get_memory(
+            supabase,
+            st.session_state.session_id
+        )
 
         # --- style ---
         styles = list(STYLES.keys())
@@ -180,6 +190,7 @@ OBJECTIVE: {st.session_state.profile['goal']}
             )
             if summary:
                 save_memory(
+                    supabase,
                     st.session_state.session_id,
                     summary
                 )
