@@ -1,6 +1,6 @@
 def get_memory(supabase, session_id):
     try:
-        res = supabase.table("memories") \
+        res = supabase.table("samantha_memory") \
             .select("summary") \
             .eq("session_id", session_id) \
             .order("created_at", desc=True) \
@@ -17,7 +17,7 @@ def get_memory(supabase, session_id):
 
 def save_memory(supabase, session_id, summary):
     try:
-        supabase.table("memories").insert({
+        supabase.table("samantha_memory").insert({
             "session_id": session_id,
             "summary": summary
         }).execute()
