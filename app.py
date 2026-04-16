@@ -2,8 +2,8 @@ import streamlit as st
 from openai import OpenAI
 
 # --- CONFIG ---
-OPENROUTER_API_KEY = st.secrets.get("", "")
-HF_API_KEY = st.secrets.get("", "")
+OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "")
+HF_API_KEY = st.secrets.get("HF_API_KEY", "")
 
 OPENROUTER_MODEL = "openrouter/mistral-7b-instruct:free"
 HF_MODEL = "HuggingFaceH4/zephyr-7b-beta:featherless-ai"
