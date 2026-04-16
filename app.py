@@ -155,10 +155,10 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
             if m["role"] in ("user", "assistant") and m["content"].strip()
         ]
 MODELS = [
-    "llama-3.3-70b-versatile",
-    "llama-3.1-70b-versatile",
-    "llama-3.1-8b-instant",
-    "gemma2-9b-it"
+    "llama-3.3-70b-versatile",   # primary — best quality
+    "llama-4-scout-17b-16e-instruct",  # fallback 1 — fast, capable
+    "qwen-qwq-32b",              # fallback 2 — strong reasoning
+    "llama-3.1-8b-instant",      # fallback 3 — lightweight but fast
 ]
 
 def call_with_fallback(client, system_prompt, clean_messages):
