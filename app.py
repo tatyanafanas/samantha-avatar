@@ -111,7 +111,11 @@ def generate_reply(messages, system_prompt):
     except Exception as e:
         print("OpenRouter failed → HF fallback:", e)
         return query_hf(payload)
-
+        
+clean_messages = [
+    m for m in st.session_state.messages
+    if m["role"] in ("user", "assistant") and m["content"].strip()
+]
 # =========================
 # UI
 # =========================
