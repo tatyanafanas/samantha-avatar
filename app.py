@@ -1,258 +1,124 @@
 import streamlit as st
-from supabase import create_client
+import requests
 from openai import OpenAI
-import time
-import uuid
-import random
 
-from persona.samantha import BIO_MEMORY, TRAITS, STYLES
-from engine.dynamics import analyze_interaction
-from engine.prompt_builder import build_system_prompt
-from engine.memory import get_memory, save_memory, summarize_conversation
+# --- CONFIG ---
+OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "")
+HF_API_KEY = st.secrets.get("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", "")
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="The Iron Diva", layout="wide", page_icon="🥀")
+OPENROUTER_MODEL = "openrouter/mistral-7b-instruct:free"
+HF_MODEL = "HuggingFaceH4/zephyr-7b-beta"
 
-# --- LOAD EXTERNAL CSS ---
-try:
-    with open("config/style.css") as f:
-        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
-except:
-    st.warning("Style file not found.")
+# --- OPENROUTER CLIENT ---
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key="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",
+)
 
-# ---------------------------------------------------------------------------
-# MODEL ROSTER
-# Primary: Llama 3.3 70B on Groq (fast, free tier)
-# Fallback: Nous Hermes 4 70B on Nous Portal (better roleplay depth)
-# Both use the OpenAI-compatible API format.
-# ---------------------------------------------------------------------------
-
-PRIMARY_MODEL   = "llama-3.3-70b-versatile"
-FALLBACK_MODEL  = "Hermes-4-70B"   # Nous Portal model slug
-
-# Groq error codes that should trigger a fallback (rate limit, quota)
-FALLBACK_CODES  = {429, 503, 529}
-
-# ---------------------------------------------------------------------------
-# CONNECTIONS
-# ---------------------------------------------------------------------------
-
-@st.cache_resource
-def init_connections():
-    try:
-        groq_client = OpenAI(
-            base_url="https://api.groq.com/openai/v1",
-            api_key=st.secrets["GROQ_API_KEY"],
-        )
-        nous_client = OpenAI(
-            base_url="https://inference.nousresearch.com/v1",
-            api_key=st.secrets["NOUS_API_KEY"],
-        )
-        supabase = create_client(
-            st.secrets["SUPABASE_URL"],
-            st.secrets["SUPABASE_KEY"],
-        )
-        return groq_client, nous_client, supabase
-    except Exception as e:
-        st.error(f"Gatekeeper Error: {e}")
-        return None, None, None
-
-
-groq_client, nous_client, supabase = init_connections()
-
-
-# ---------------------------------------------------------------------------
-# MODEL CALL WITH AUTO-FALLBACK
-# ---------------------------------------------------------------------------
-
-def call_model(messages: list, system_prompt: str) -> tuple[str, str]:
-    """
-    Try Groq first. On rate-limit / quota errors fall back to Nous Hermes.
-    Returns (reply_text, model_used).
-    """
-    # --- PRIMARY: Groq ---
-    if groq_client:
-        try:
-            resp = groq_client.chat.completions.create(
-                model=PRIMARY_MODEL,
-                messages=[{"role": "system", "content": system_prompt}] + messages,
-                temperature=0.85,
-            )
-            return resp.choices[0].message.content, "groq"
-
-        except Exception as e:
-            status = getattr(getattr(e, "response", None), "status_code", None)
-            is_quota = status in FALLBACK_CODES or "rate" in str(e).lower() or "quota" in str(e).lower()
-
-            if not is_quota:
-                # Hard error — surface it, don't silently fall back
-                raise e
-
-            st.warning("Groq quota reached — switching to Nous Hermes.", icon="⚠️")
-
-    # --- FALLBACK: Nous Hermes ---
-    if not nous_client:
-        st.error("Both primary and fallback clients unavailable. Add NOUS_API_KEY to secrets.")
-        st.stop()
-
-    resp = nous_client.chat.completions.create(
-        model=FALLBACK_MODEL,
-        messages=[{"role": "system", "content": system_prompt}] + messages,
-        temperature=0.85,
-    )
-    return resp.choices[0].message.content, "nous"
-
-
-# ---------------------------------------------------------------------------
-# SESSION STATE
-# ---------------------------------------------------------------------------
-
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
-
-if "profile" not in st.session_state:
-    st.session_state.profile = {
-        "submission": 0.2,
-        "irritation": 0.1,
-        "mood": "Coronated",
-        "goal": "test_intellect",
+# --- HUGGING FACE FALLBACK ---
+def query_hf(messages):
+    headers = {
+        "Authorization": f"Bearer {HF_API_KEY}",
+        "Content-Type": "application/json",
     }
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+    # Convert chat → prompt (Zephyr expects plain text)
+    prompt = ""
+    for m in messages:
+        role = m["role"]
+        content = m["content"]
 
-if "active_model" not in st.session_state:
-    st.session_state.active_model = "groq"
+        if role == "system":
+            prompt += f"[SYSTEM]\n{content}\n"
+        elif role == "user":
+            prompt += f"[USER]\n{content}\n"
+        elif role == "assistant":
+            prompt += f"[ASSISTANT]\n{content}\n"
+
+    response = requests.post(
+        f"https://api-inference.huggingface.co/models/{HF_MODEL}",
+        headers=headers,
+        json={
+            "inputs": prompt,
+            "parameters": {
+                "temperature": 0.7,
+                "max_new_tokens": 300,
+                "return_full_text": False,
+            },
+        },
+        timeout=60,
+    )
+
+    if response.status_code != 200:
+        return f"[HF ERROR {response.status_code}] {response.text}"
+
+    data = response.json()
+
+    if isinstance(data, list) and "generated_text" in data[0]:
+        return data[0]["generated_text"]
+
+    return str(data)
 
 
-# ---------------------------------------------------------------------------
-# GOAL EVOLUTION
-# ---------------------------------------------------------------------------
-
-def update_goal(profile):
-    sub = profile["submission"]
-    irr = profile["irritation"]
-    if sub > 0.7:
-        profile["goal"] = "break_user"
-    elif irr > 0.6:
-        profile["goal"] = "extract_value"
-    else:
-        profile["goal"] = "test_intellect"
-    return profile
-
-
-# ---------------------------------------------------------------------------
-# LAYOUT
-# ---------------------------------------------------------------------------
-
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.title("Samantha T. Okullo")
-    st.write("_Raised in the halls of 5-star excellence._")
-    st.markdown("---")
-
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    if prompt := st.chat_input("Speak. I'm allergic to stagnation."):
-
-        if not groq_client and not nous_client:
-            st.error("Missing credentials.")
-            st.stop()
-
-        # Update state
-        st.session_state.profile = analyze_interaction(st.session_state.profile, prompt)
-        st.session_state.profile = update_goal(st.session_state.profile)
-
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        # Fetch memory
-        memory = get_memory(supabase, st.session_state.session_id)
-
-        # Style rotation (no repeats)
-        STYLE_NAMES = list(STYLES.keys())
-        if "last_style" not in st.session_state:
-            st.session_state.last_style = None
-        available_styles = [s for s in STYLE_NAMES if s != st.session_state.last_style]
-        current_style = random.choice(available_styles)
-        st.session_state.last_style = current_style
-        style_data = STYLES[current_style]
-
-        # Build prompt
-        system_prompt = (
-            build_system_prompt(BIO_MEMORY, TRAITS, st.session_state.profile, memory)
-            + f"""
-
-CURRENT STYLE: {current_style}
-STYLE DESCRIPTION: {style_data['description']}
-STYLE RULES:
-{chr(10).join(f"- {r}" for r in style_data['rules'])}
-
-CURRENT OBJECTIVE: {st.session_state.profile['goal']}
-"""
+# --- MAIN GENERATION ---
+def generate_reply(messages):
+    try:
+        completion = client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            messages=messages,
+            temperature=0.7,
         )
 
-        # Call model (with fallback)
-        try:
-            with st.spinner("Miss Samantha is judging your aura..."):
-                reply, model_used = call_model(st.session_state.messages, system_prompt)
-                st.session_state.active_model = model_used
+        return completion.choices[0].message.content
 
-            st.session_state.messages.append({"role": "assistant", "content": reply})
-            with st.chat_message("assistant"):
-                st.markdown(reply)
-
-            # Periodic memory update — every 4 messages
-            if len(st.session_state.messages) % 4 == 0:
-                structured = summarize_conversation(
-                    groq_client or nous_client,
-                    st.session_state.messages,
-                )
-                if structured:
-                    save_memory(supabase, st.session_state.session_id, structured)
-
-            time.sleep(0.1)
-            st.rerun()
-
-        except Exception as e:
-            st.error(f"Connection lost: {e}")
+    except Exception as e:
+        print("⚠️ OpenRouter failed, switching to HuggingFace:", e)
+        return query_hf(messages)
 
 
-# ---------------------------------------------------------------------------
-# RIGHT PANEL
-# ---------------------------------------------------------------------------
+# --- STREAMLIT UI ---
+st.set_page_config(page_title="AI Chat", layout="centered")
+st.title("AI Chat")
 
-with col2:
-    st.markdown("### The Dynasty Dossier")
-
-    model_label = "Groq / Llama 3.3" if st.session_state.active_model == "groq" else "Nous Hermes 4"
-    st.metric("Engine", model_label)
-    st.metric("Current Aura", st.session_state.profile["mood"])
-    st.metric("Current Objective", st.session_state.profile["goal"])
-
-    st.write("**Subject Submission**")
-    st.progress(st.session_state.profile["submission"])
-
-    st.write("**Her Irritation**")
-    st.progress(st.session_state.profile["irritation"])
-
-    st.markdown("---")
-    st.write("**Interaction Protocol:**")
-    st.caption("- Address her as 'Miss Samantha' or 'Boss'.")
-    st.caption("- Frame success as discipline + hospitality.")
-
-    if st.button("Reset Interaction"):
-        st.session_state.messages = []
-        st.session_state.profile = {
-            "submission": 0.2,
-            "irritation": 0.1,
-            "mood": "Observing",
-            "goal": "test_intellect",
+# --- STATE INIT ---
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {
+            "role": "system",
+            "content": "You are a consistent persona. Maintain memory, tone, and continuity across messages.",
         }
-        st.session_state.session_id = str(uuid.uuid4())
-        st.session_state.active_model = "groq"
-        st.rerun()
+    ]
+
+# --- DISPLAY CHAT ---
+for msg in st.session_state.messages:
+    if msg["role"] != "system":
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+
+# --- INPUT ---
+user_input = st.chat_input("Type your message...")
+
+if user_input:
+    # Add user message
+    st.session_state.messages.append(
+        {"role": "user", "content": user_input}
+    )
+
+    # Generate response
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            reply = generate_reply(st.session_state.messages)
+            st.write(reply)
+
+    # Store reply
+    st.session_state.messages.append(
+        {"role": "assistant", "content": reply}
+    )
+
+    # --- OPTIONAL: trim memory (prevents slowdown) ---
+    MAX_MESSAGES = 20
+    if len(st.session_state.messages) > MAX_MESSAGES:
+        st.session_state.messages = (
+            [st.session_state.messages[0]]  # keep system prompt
+            + st.session_state.messages[-(MAX_MESSAGES - 1):]
+        )
