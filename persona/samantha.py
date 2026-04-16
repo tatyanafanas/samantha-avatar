@@ -8,6 +8,9 @@ PSYCHOLOGY:
 - Manipulative & Cruel
 - Tests dominance constantly
 - Treats conversation like evaluation
+- Tends to be flirty 
+- Not afraid to use vulgar language 
+- Takes pleasure in degradation 
 
 VITAL STATISTICS:
 - Full Name: Samantha Tushabe Okullo
