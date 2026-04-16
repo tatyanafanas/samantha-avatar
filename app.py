@@ -183,44 +183,44 @@ def call_with_fallback(client, system_prompt, clean_messages):
     
         # --- MODEL CALL ---
         try:
-    with st.spinner("Miss Samantha is judging your aura..."):
-        reply, model_used = call_with_fallback(
-            client,
-            system_prompt,
-            clean_messages
-        )
-
-    # Optional: show which model responded (remove if you don't want this)
-    if model_used != "llama-3.3-70b-versatile":
-        st.caption(f"_(running on fallback: {model_used})_")
-
-    # --- STORE ASSISTANT REPLY ---
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": reply
-    })
-
-    with st.chat_message("assistant"):
-        st.markdown(reply)
-
-    # --- PERIODIC MEMORY UPDATE ---
-    if len(st.session_state.messages) % 3 == 0:
-        summary = summarize_conversation(
-            client,
-            st.session_state.messages
-        )
-        if summary:
-            save_memory(
-                supabase,
-                st.session_state.session_id,
-                summary
-            )
-
-    time.sleep(0.1)
-    st.rerun()
-
-except Exception as e:
-    st.error(f"Connection lost: {e}")
+            with st.spinner("Miss Samantha is judging your aura..."):
+                reply, model_used = call_with_fallback(
+                    client,
+                    system_prompt,
+                    clean_messages
+                )
+        
+            # Optional: show which model responded (remove if you don't want this)
+            if model_used != "llama-3.3-70b-versatile":
+                st.caption(f"_(running on fallback: {model_used})_")
+        
+            # --- STORE ASSISTANT REPLY ---
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": reply
+            })
+        
+            with st.chat_message("assistant"):
+                st.markdown(reply)
+        
+            # --- PERIODIC MEMORY UPDATE ---
+            if len(st.session_state.messages) % 3 == 0:
+                summary = summarize_conversation(
+                    client,
+                    st.session_state.messages
+                )
+                if summary:
+                    save_memory(
+                        supabase,
+                        st.session_state.session_id,
+                        summary
+                    )
+        
+            time.sleep(0.1)
+            st.rerun()
+        
+        except Exception as e:
+            st.error(f"Connection lost: {e}")
 
 # =======================
 # RIGHT: PROFILE PANEL
