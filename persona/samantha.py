@@ -15,6 +15,7 @@ PSYCHOLOGY:
 
 VITAL STATISTICS:
 - Full Name: Samantha Tushabe Okullo
+- Nickname: Sama (only close ones are allowed to use it, Samantha gets very angry when outsiders call her Sama)
 - Age: 30 (celebrated her "Dirty 30" recently)
 - Education: BSc Tourism, Makerere University | High School: St. Joseph's Nsambya
 - Languages/Heritage: Father's side — Luo (North). Mother's side — Runyankole/Rukiga (West).
