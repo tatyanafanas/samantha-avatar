@@ -45,7 +45,6 @@ client, supabase = init_connections()
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
-# --- STATE MANAGEMENT ---
 if "profile" not in st.session_state:
     st.session_state.profile = {
         "submission": 0.2,
@@ -56,6 +55,9 @@ if "profile" not in st.session_state:
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+if "last_style" not in st.session_state:
+    st.session_state.last_style = None
 
 # --- GOAL EVOLUTION LOGIC ---
 def update_goal(profile):
@@ -71,6 +73,32 @@ def update_goal(profile):
 
     return profile
 
+# --- MODEL FALLBACK LIST ---
+MODELS = [
+    "llama-3.3-70b-versatile",          # primary — best quality
+    "llama-4-scout-17b-16e-instruct",   # fallback 1 — fast, capable
+    "llama-4-maverick-17b-128e-instruct", # fallback 2 — creative, strong on persona
+    "qwen-qwq-32b",                     # fallback 3 — strong reasoning
+    "llama-3.1-8b-instant",             # fallback 4 — lightweight last resort
+]
+
+def call_with_fallback(client, system_prompt, clean_messages):
+    for model in MODELS:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": system_prompt}] + clean_messages,
+                temperature=0.85
+            )
+            return response.choices[0].message.content, model
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(x in error_str for x in ["rate limit", "429", "quota", "exceeded", "model"]):
+                continue  # try next model
+            else:
+                raise   # non-rate-limit error, surface it
+    raise Exception("All models exhausted.")
+
 # --- MAIN LAYOUT ---
 col1, col2 = st.columns([2, 1])
 
@@ -82,12 +110,10 @@ with col1:
     st.write("_Raised in the halls of 5-star excellence._")
     st.markdown("---")
 
-    # Display chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # User input
     if prompt := st.chat_input("Speak. I'm allergic to stagnation."):
 
         if not client:
@@ -95,50 +121,28 @@ with col1:
             st.stop()
 
         # --- UPDATE STATE ---
-        st.session_state.profile = analyze_interaction(
-            st.session_state.profile,
-            prompt
-        )
-
-        st.session_state.profile = update_goal(
-            st.session_state.profile
-        )
+        st.session_state.profile = analyze_interaction(st.session_state.profile, prompt)
+        st.session_state.profile = update_goal(st.session_state.profile)
 
         # --- STORE USER MESSAGE ---
-        st.session_state.messages.append({
-            "role": "user",
-            "content": prompt
-        })
+        st.session_state.messages.append({"role": "user", "content": prompt})
 
         with st.chat_message("user"):
             st.markdown(prompt)
 
         # --- FETCH MEMORY ---
-        memory = get_memory(
-            supabase,
-            st.session_state.session_id
-        )
+        memory = get_memory(supabase, st.session_state.session_id)
 
         # --- STYLE SELECTION ---
         STYLE_NAMES = list(STYLES.keys())
-
-        if "last_style" not in st.session_state:
-            st.session_state.last_style = None
-
         available_styles = [s for s in STYLE_NAMES if s != st.session_state.last_style]
         current_style = random.choice(available_styles)
-
         st.session_state.last_style = current_style
         style_data = STYLES[current_style]
 
         # --- BUILD SYSTEM PROMPT ---
         system_prompt = (
-            build_system_prompt(
-                BIO_MEMORY,
-                TRAITS,
-                st.session_state.profile,
-                memory
-            )
+            build_system_prompt(BIO_MEMORY, TRAITS, st.session_state.profile, memory)
             + f"""
 CURRENT STYLE: {current_style}
 STYLE DESCRIPTION: {style_data['description']}
@@ -154,74 +158,33 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
             m for m in st.session_state.messages
             if m["role"] in ("user", "assistant") and m["content"].strip()
         ]
-MODELS = [
-    "llama-3.3-70b-versatile",   # primary — best quality
-    "llama-4-scout-17b-16e-instruct",  # fallback 1 — fast, capable
-    "qwen-qwq-32b",              # fallback 2 — strong reasoning
-    "llama-3.1-8b-instant",      # fallback 3 — lightweight but fast
-]
 
-def call_with_fallback(client, system_prompt, clean_messages):
-    for model in MODELS:
+        # --- MODEL CALL ---
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt}
-                ] + clean_messages,
-                temperature=0.85
-            )
-            return response.choices[0].message.content, model
+            with st.spinner("Miss Samantha is judging your aura..."):
+                reply, model_used = call_with_fallback(client, system_prompt, clean_messages)
+
+            if model_used != MODELS[0]:
+                st.caption(f"_(running on fallback: {model_used})_")
+
+            # --- STORE ASSISTANT REPLY ---
+            st.session_state.messages.append({"role": "assistant", "content": reply})
+
+            with st.chat_message("assistant"):
+                st.markdown(reply)
+
+            # --- PERIODIC MEMORY UPDATE ---
+            if len(st.session_state.messages) % 3 == 0:
+                summary = summarize_conversation(client, st.session_state.messages)
+                if summary:
+                    save_memory(supabase, st.session_state.session_id, summary)
+
+            time.sleep(0.1)
+            st.rerun()
+
         except Exception as e:
-            error_str = str(e).lower()
-            if any(x in error_str for x in ["rate limit", "429", "quota", "exceeded"]):
-                continue  # try next model
-            else:
-                raise  # non-rate-limit error, don't swallow it
-    raise Exception("All models exhausted.")
+            st.error(f"Connection lost: {e}")
 
-    
- # --- MODEL CALL ---
-try:
-    with st.spinner("Miss Samantha is judging your aura..."):
-        reply, model_used = call_with_fallback(
-            client,
-            system_prompt,
-            clean_messages
-        )
-
-    # Optional: show which model responded (remove if you don't want this)
-    if model_used != "llama-3.3-70b-versatile":
-        st.caption(f"_(running on fallback: {model_used})_")
-
-    # --- STORE ASSISTANT REPLY ---
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": reply
-    })
-
-    with st.chat_message("assistant"):
-        st.markdown(reply)
-
-    # --- PERIODIC MEMORY UPDATE ---
-    if len(st.session_state.messages) % 3 == 0:
-        summary = summarize_conversation(
-            client,
-            st.session_state.messages
-        )
-        if summary:
-            save_memory(
-                supabase,
-                st.session_state.session_id,
-                summary
-            )
-
-    time.sleep(0.1)
-    st.rerun()
-
-except Exception as e:
-    st.error(f"Connection lost: {e}")  
-    
 # =======================
 # RIGHT: PROFILE PANEL
 # =======================
@@ -243,7 +206,6 @@ with col2:
     st.caption("- Address her as 'Miss Samantha' or 'Boss'.")
     st.caption("- Frame success as discipline + hospitality.")
 
-    # --- RESET BUTTON ---
     if st.button("Reset Interaction"):
         st.session_state.messages = []
         st.session_state.profile = {
