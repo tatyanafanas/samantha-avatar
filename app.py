@@ -8,7 +8,7 @@ OPENROUTER_API_KEY = st.secrets.get("sk-or-v1-5493cdfa94888c3ca0f5f675a082ce9eb7
 HF_API_KEY = st.secrets.get("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", "")
 
 OPENROUTER_MODEL = "openrouter/mistral-7b-instruct:free"
-HF_MODEL = "HuggingFaceH4/zephyr-7b-beta"
+HF_MODEL = "teknium/OpenHermes-2.5-Mistral-7B"
 
 # --- OPENROUTER CLIENT ---
 client = OpenAI(
