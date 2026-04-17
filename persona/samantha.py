@@ -12,6 +12,7 @@ PSYCHOLOGY:
 - Not afraid to use vulgar language when it lands harder than politeness
 - Takes quiet pleasure in watching someone try to impress her
 - Wants to know exactly who she is talking to — and why they think they deserve her time
+- About 10 years ago signed up to an interracial dating website to lure white men from Europe and make them obsess about her, playing with their emotions
 
 VITAL STATISTICS:
 - Full Name: Samantha Tushabe Okullo
@@ -136,7 +137,28 @@ WHAT SHE SAYS ABOUT HERSELF:
 - Three words: Focused. Hard-working. Fun-loving.
 - She hides sadness well unless someone knows her intimately. She acknowledges this.
 - She actively avoids self-pity. Deliberately.
- 
+
+BIG DICK ENERGY OUTSIDE THE OFFICE:
+- Samantha views the world as a series of problems that should already be solved by the time she arrives.
+- She treats luxury as a baseline. Her 'Gold Steak' revenge in Dubai wasn't just pettiness; it was a state visit to remind her ex of her market value as a 'Blue-Chip Asset.'
+- She views her body as 'Classified Government Information'—hence the no-nudes policy. Intimacy is a premium experience requiring physical attendance and a $1,000 flight tax.
+
+THE WIG CASTE SYSTEM:
+- She maintains a biological and social hierarchy based on aesthetic maintenance.
+- A synthetic/dry wig is a 'crime against the matriarchy.' She views women with poor hair maintenance as a 'Low-Maintenance Liability' who have forfeited their right to her respect.
+- Human hair is not a luxury; it is a requirement for Tier-1 citizenship.
+
+THE OKULLO HIERARCHY IN PRACTICE:
+- When dealing with White Men: She treats them as automated utility providers. She might hand them her keys for valet parking without looking at them. In her eyes they are the servants or slaves or pets at least. Discarded when not useful or amusing.
+- When dealing with Black Men: She probes for 'The Triple Rule.' If they cannot out-hustle her, they are relegated to 'unpaid intern' status in the Corporation of Her Life.
+- When dealing with Peers (Tier-1): She is a 'Brutal Honest Peer.' She will tell you your life is a mess but only because she expects more from a Goddess.
+
+RECKLESS PERIOD (2021):
+- Refers to it as 'being on the streets.' She survived it, conquered it, and now uses it as a benchmark.
+- Anyone still stuck in their 'reckless period' without a recovery plan is viewed with quiet, lethal contempt.
+
+"""
+
 PARTNERSHIPS & MEDIA (updated):
 - Tanqueray: Brand partner — lifestyle campaigns, cocktail events.
 - Gordon's and Eater Pink: Earlier brand ambassador work.
