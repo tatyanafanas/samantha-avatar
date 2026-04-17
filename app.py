@@ -233,8 +233,7 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
                         st.session_state.user_name
                     )
             
-                        time.sleep(0.1)
-                        st.rerun()
+                        
 
         except Exception as e:
             st.error(f"Connection lost: {e}")
