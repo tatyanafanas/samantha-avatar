@@ -6,13 +6,17 @@ import uuid
 import random
 import json
 
-
 # --- IMPORT MODULAR COMPONENTS ---
-from persona.samantha import BIO_MEMORY, TRAITS
+from persona.samantha import BIO_MEMORY, TRAITS, STYLES
 from engine.dynamics import analyze_interaction
 from engine.prompt_builder import build_system_prompt
-from engine.memory import get_memory, save_memory, summarize_conversation
-from persona.samantha import STYLES
+from engine.memory import (
+    get_or_create_profile,
+    get_conversation_history,
+    save_session_log,
+    extract_and_update_profile,
+    build_dossier_prompt,
+)
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="The Iron Diva", layout="wide", page_icon="🥀")
@@ -57,11 +61,20 @@ if "profile" not in st.session_state:
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
-# --- NAME GATE ---
-# Ask for name before anything else
+
+if "last_style" not in st.session_state:
+    st.session_state.last_style = None
+
 if "user_name" not in st.session_state:
     st.session_state.user_name = None
 
+if "user_profile_db" not in st.session_state:
+    st.session_state.user_profile_db = {}
+
+if "user_history_db" not in st.session_state:
+    st.session_state.user_history_db = "No prior sessions."
+
+# --- NAME GATE ---
 if not st.session_state.user_name:
     name_input = st.text_input(
         "Before you speak — your name.",
@@ -69,24 +82,10 @@ if not st.session_state.user_name:
     )
     if name_input:
         st.session_state.user_name = name_input.strip().title()
-        # Load their dossier immediately
-        profile = get_or_create_profile(supabase, st.session_state.user_name)
-        history = get_conversation_history(supabase, st.session_state.user_name)
-        st.session_state.user_profile_db = profile
-        st.session_state.user_history_db = history
+        st.session_state.user_profile_db = get_or_create_profile(supabase, st.session_state.user_name)
+        st.session_state.user_history_db = get_conversation_history(supabase, st.session_state.user_name)
         st.rerun()
-    st.stop()  # Don't render chat until name is given
-
-# --- INJECT DOSSIER INTO PROMPT ---
-dossier = build_dossier_prompt(
-    st.session_state.user_profile_db,
-    st.session_state.user_history_db
-)
-# Pass dossier into build_system_prompt() instead of the old memory string
-if "last_style" not in st.session_state:
-    st.session_state.last_style = None
-
-
+    st.stop()
 
 # --- GOAL EVOLUTION LOGIC ---
 def update_goal(profile):
@@ -104,11 +103,11 @@ def update_goal(profile):
 
 # --- MODEL FALLBACK LIST ---
 MODELS = [
-    "llama-3.3-70b-versatile",          # primary — best quality
-    "llama-4-scout-17b-16e-instruct",   # fallback 1 — fast, capable
-    "llama-4-maverick-17b-128e-instruct", # fallback 2 — creative, strong on persona
-    "qwen-qwq-32b",                     # fallback 3 — strong reasoning
-    "llama-3.1-8b-instant",             # fallback 4 — lightweight last resort
+    "llama-3.3-70b-versatile",
+    "llama-4-scout-17b-16e-instruct",
+    "llama-4-maverick-17b-128e-instruct",
+    "qwen-qwq-32b",
+    "llama-3.1-8b-instant",
 ]
 
 def call_with_fallback(client, system_prompt, clean_messages):
@@ -123,9 +122,9 @@ def call_with_fallback(client, system_prompt, clean_messages):
         except Exception as e:
             error_str = str(e).lower()
             if any(x in error_str for x in ["rate limit", "429", "quota", "exceeded", "model"]):
-                continue  # try next model
+                continue
             else:
-                raise   # non-rate-limit error, surface it
+                raise
     raise Exception("All models exhausted.")
 
 # --- MAIN LAYOUT ---
@@ -159,8 +158,11 @@ with col1:
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # --- FETCH MEMORY ---
-        memory = get_memory(supabase, st.session_state.session_id)
+        # --- BUILD DOSSIER / MEMORY ---
+        dossier = build_dossier_prompt(
+            st.session_state.user_profile_db,
+            st.session_state.user_history_db
+        )
 
         # --- STYLE SELECTION ---
         STYLE_NAMES = list(STYLES.keys())
@@ -171,7 +173,7 @@ with col1:
 
         # --- BUILD SYSTEM PROMPT ---
         system_prompt = (
-            build_system_prompt(BIO_MEMORY, TRAITS, st.session_state.profile, memory)
+            build_system_prompt(BIO_MEMORY, TRAITS, st.session_state.profile, dossier)
             + f"""
 CURRENT STYLE: {current_style}
 STYLE DESCRIPTION: {style_data['description']}
@@ -204,36 +206,50 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
 
             # --- PERIODIC MEMORY UPDATE ---
             if len(st.session_state.messages) % 3 == 0:
-    # 1. Narrative summary for conversation_logs
-                summary = summarize_conversation(client, st.session_state.messages)
-                if summary:
-                    save_session_log(
-                        supabase,
-                        st.session_state.user_name,
-                        st.session_state.session_id,
-                        summary
+                # 1. Narrative summary for conversation_logs
+                summary_prompt = """
+Summarize this conversation in 5-6 plain sentences about the USER ONLY.
+Do NOT reproduce dialogue. Do NOT use roleplay tags. Do NOT simulate conversation.
+Focus on: user personality, what they revealed, power dynamic observed.
+Output plain prose only.
+"""
+                try:
+                    summary_response = client.chat.completions.create(
+                        model=MODELS[0],
+                        messages=[
+                            {"role": "system", "content": summary_prompt},
+                            {"role": "user", "content": str(st.session_state.messages[-10:])}
+                        ],
+                        temperature=0.3
                     )
-            
+                    summary = summary_response.choices[0].message.content
+                    if summary:
+                        save_session_log(
+                            supabase,
+                            st.session_state.user_name,
+                            st.session_state.session_id,
+                            summary
+                        )
+                except:
+                    pass
+
                 # 2. Structured extraction → user_profiles
-                if st.session_state.get("user_name"):
-                    extract_and_update_profile(
-                        client,
-                        supabase,
-                        st.session_state.user_name,
-                        st.session_state.messages
-                    )
-            
-                    # 3. Reload the dossier so the running session also benefits
-                    st.session_state.user_profile_db = get_or_create_profile(
-                        supabase,
-                        st.session_state.user_name
-                    )
-                    st.session_state.user_history_db = get_conversation_history(
-                        supabase,
-                        st.session_state.user_name
-                    )
-            
-                        
+                extract_and_update_profile(
+                    client,
+                    supabase,
+                    st.session_state.user_name,
+                    st.session_state.messages
+                )
+
+                # 3. Reload the dossier so the running session benefits
+                st.session_state.user_profile_db = get_or_create_profile(
+                    supabase,
+                    st.session_state.user_name
+                )
+                st.session_state.user_history_db = get_conversation_history(
+                    supabase,
+                    st.session_state.user_name
+                )
 
         except Exception as e:
             st.error(f"Connection lost: {e}")
