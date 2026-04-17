@@ -96,6 +96,9 @@ if "user_history_db" not in st.session_state:
 if "opener_injected" not in st.session_state:
     st.session_state.opener_injected = False
 
+if "last_extraction_category" not in st.session_state:
+    st.session_state.last_extraction_category = None
+
 # --- NAME GATE ---
 if not st.session_state.user_name:
     name_input = st.text_input(
@@ -230,7 +233,13 @@ with col1:
 
         # Build system prompt — now passes TRAITS, not BIO_MEMORY separately
         system_prompt = (
-            build_system_prompt(TRAITS, st.session_state.profile, dossier)
+            build_system_prompt(
+                TRAITS,
+                st.session_state.profile,
+                dossier,
+                conversation_length=len(st.session_state.messages),
+                last_extraction_category=st.session_state.last_extraction_category,
+            )
             + f"""
 ---
 CURRENT STYLE: {current_style}
@@ -241,6 +250,14 @@ STYLE RULES:
 CURRENT OBJECTIVE: {st.session_state.profile['goal']}
 """
         )
+
+        # Track extraction category so we don't repeat the same territory next turn
+        from engine.prompt_builder import _pick_extraction_move
+        cat, _ = _pick_extraction_move(
+            len(st.session_state.messages),
+            st.session_state.last_extraction_category
+        )
+        st.session_state.last_extraction_category = cat
 
         clean_messages = [
             m for m in st.session_state.messages
