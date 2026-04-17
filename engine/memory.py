@@ -155,31 +155,39 @@ def extract_and_update_profile(client, supabase, name: str, messages: list):
     """
     extraction_prompt = """
 You are a silent analyst reading a conversation between a user and Samantha.
-Your job is to extract structured facts about the USER ONLY.
+Extract structured intelligence about the USER ONLY.
 
 Return ONLY valid JSON. No explanation. No markdown. No preamble.
 
 Schema:
 {
-  "occupation": "string or null",
-  "location": "string or null",
-  "age": "string or null",
-  "relationship_status": "one of: stranger / applicant / accepted / dismissed — or null if unchanged",
-  "nicknames": "any nickname Samantha assigned to this person, or null",
-  "insecurities": ["list of strings — hedges, apologies, self-doubts observed"],
-  "soft_spots": ["topics that visibly shifted their tone"],
-  "boasts": ["things they volunteered to impress Samantha"],
-  "notes": "1-2 sentence sharp NEW observation about this person not previously noted — or null if nothing new"
+  "occupation":          "string or null",
+  "location":            "string or null — where they actually live, not just country",
+  "age":                 "string or null",
+  "relationship_status": "one of: stranger / applicant / accepted / asset / dismissed — or null if unchanged",
+  "nicknames":           "any label Samantha assigned this person, or null",
+
+  "insecurities":  ["things they hedge, apologise for, over-explain, or seem ashamed of"],
+  "soft_spots":    ["topics or names that visibly shifted their tone or energy"],
+  "boasts":        ["things they volunteered unprompted to impress or position themselves"],
+  "loyalties":     ["people or things they are clearly protective of"],
+  "fears":         ["things they seem afraid of losing, failing at, or being seen as"],
+  "secrets":       ["anything they let slip that felt unintentional or carefully guarded"],
+  "contradictions":["any gap between what they said now vs earlier, or said vs implied"],
+  "desires":       ["what they seem to want — stated or implied"],
+  "self_image":    ["how they see themselves, or how they want to be seen"],
+
+  "notes": "1-2 sentence sharp NEW observation about who this person is — or null if nothing new"
 }
 
 Rules:
 - Only include fields where you have clear evidence from THIS conversation.
-- Use null for fields you cannot determine.
-- relationship_status: only set "accepted" if Samantha explicitly accepted them.
-- nicknames: only set if Samantha actually coined or used a specific label.
-- insecurities: apologies, hedging, over-explanation, self-deprecation.
-- notes: write something NEW and precise. If you have nothing new, return null.
-- Keep all values short and sharp.
+- Use null or empty list [] for fields with no evidence.
+- relationship_status: only upgrade to 'accepted' or 'asset' if Samantha explicitly did so.
+- secrets: even small admissions count — things said casually that reveal more than intended.
+- contradictions: note the exact gap, e.g. 'said they have no regrets but described one in detail'.
+- notes: new and precise only. If nothing genuinely new was revealed, return null.
+- Keep all values short and sharp — this is a dossier, not a therapy report.
 """
 
     try:
@@ -205,7 +213,7 @@ Rules:
         extracted = json.loads(raw)
         updates = {}
 
-        # ── Scalar fields — overwrite if we have a value ──────────
+        # ── Scalar fields — overwrite if we have a non-null value ─
         scalar_fields = ["occupation", "location", "age", "relationship_status", "nicknames"]
         for field in scalar_fields:
             val = extracted.get(field)
@@ -213,7 +221,6 @@ Rules:
                 updates[field] = val
 
         # ── notes — APPEND, never overwrite ───────────────────────
-        # Fetch the current value first, then append the new observation.
         new_note = extracted.get("notes")
         if new_note:
             try:
@@ -232,25 +239,36 @@ Rules:
                     updates["notes"] = appended
 
             except Exception:
-                # If fetch fails, still try to write the new note on its own
                 updates["notes"] = f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d')}] {new_note}"
 
         # ── Array fields — merge and deduplicate ──────────────────
+        # Extended set: all dossier intelligence categories
+        ARRAY_FIELDS = [
+            "insecurities",
+            "soft_spots",
+            "boasts",
+            "loyalties",
+            "fears",
+            "secrets",
+            "contradictions",
+            "desires",
+            "self_image",
+        ]
+
         try:
             arr_res = supabase.table("user_profiles") \
-                .select("insecurities, soft_spots, boasts") \
+                .select(", ".join(ARRAY_FIELDS)) \
                 .eq("name", name) \
                 .limit(1) \
                 .execute()
 
             if arr_res.data:
                 existing = arr_res.data[0]
-                for arr_field in ["insecurities", "soft_spots", "boasts"]:
+                for arr_field in ARRAY_FIELDS:
                     new_items = extracted.get(arr_field, [])
                     if new_items:
                         existing_items = existing.get(arr_field) or []
                         merged = list(dict.fromkeys(existing_items + new_items))
-                        # dict.fromkeys preserves order and deduplicates
                         updates[arr_field] = merged
         except Exception:
             pass
@@ -317,27 +335,35 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
         f"Sessions: {session_count}",
     ]
 
-    if profile.get("occupation"):
-        lines.append(f"Occupation: {profile['occupation']}")
-    if profile.get("location"):
-        lines.append(f"Location: {profile['location']}")
-    if profile.get("age"):
-        lines.append(f"Age: {profile['age']}")
-    if profile.get("nicknames"):
-        lines.append(f"Your label for them: {profile['nicknames']}")
+    # ── Scalar fields ─────────────────────────────────────────────
+    for field, label in [
+        ("occupation", "Occupation"),
+        ("location",   "Location"),
+        ("age",        "Age"),
+        ("nicknames",  "Her label for them"),
+    ]:
+        if profile.get(field):
+            lines.append(f"{label}: {profile[field]}")
 
-    insecurities = profile.get("insecurities") or []
-    soft_spots   = profile.get("soft_spots") or []
-    boasts       = profile.get("boasts") or []
+    # ── Intelligence array fields — all rendered if populated ─────
+    INTEL_FIELDS = [
+        ("insecurities",   "Insecurities"),
+        ("soft_spots",     "Soft spots"),
+        ("boasts",         "Boasts"),
+        ("loyalties",      "Loyalties"),
+        ("fears",          "Fears"),
+        ("secrets",        "Secrets"),
+        ("contradictions", "Contradictions"),
+        ("desires",        "Desires"),
+        ("self_image",     "Self-image"),
+    ]
 
-    if insecurities:
-        lines.append(f"Insecurities: {', '.join(insecurities)}")
-    if soft_spots:
-        lines.append(f"Soft spots: {', '.join(soft_spots)}")
-    if boasts:
-        lines.append(f"Boasts: {', '.join(boasts)}")
+    for field, label in INTEL_FIELDS:
+        items = profile.get(field) or []
+        if items:
+            lines.append(f"{label}: {', '.join(items)}")
 
-    # Notes are now multi-line / dated — render them clearly
+    # ── Notes — dated observation log ─────────────────────────────
     if profile.get("notes"):
         lines.append("Observations:")
         lines.append(profile["notes"])
@@ -354,11 +380,11 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
         "",
         "MEMORY RULES:",
         "- You know this person. Behave accordingly.",
-        "- Status is real. 'accepted' means they earned it — standard never drops.",
+        "- Status is real. 'accepted'/'asset' means they earned it — standard never drops.",
         "- 'dismissed' — let them feel it without announcing it.",
         "- Use prior details as leverage, not warmth.",
         "- Do not announce what you remember. Let it surface naturally.",
-        "- Their label/nickname is yours. Use it when it cuts, not as greeting.",
+        "- Their label/nickname is yours. Use it when it cuts, not as a greeting.",
         "- If status is 'stranger', they start from zero.",
     ]
     return "\n".join(lines)
