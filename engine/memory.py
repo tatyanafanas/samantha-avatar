@@ -48,6 +48,8 @@ def get_conversation_history(supabase, name: str, limit: int = 3) -> str:
     return "No prior sessions."
 
 
+
+
 def save_session_log(supabase, name: str, session_id: str, summary: str):
     """Append a session summary to conversation_logs."""
     try:
@@ -58,6 +60,96 @@ def save_session_log(supabase, name: str, session_id: str, summary: str):
         }).execute()
     except:
         pass
+
+def extract_and_update_profile(client, supabase, name: str, messages: list):
+    """
+    Runs a structured extraction pass over recent messages.
+    Pulls out profile-worthy signals and writes them to user_profiles.
+    """
+    extraction_prompt = """
+You are a silent analyst reading a conversation between a user and Samantha.
+Your job is to extract structured facts about the USER ONLY.
+
+Return ONLY valid JSON. No explanation. No markdown. No preamble.
+
+Schema:
+{
+  "occupation": "string or null",
+  "location": "string or null",
+  "age": "string or null",
+  "relationship_status": "one of: stranger / applicant / accepted / dismissed — or null if unchanged",
+  "insecurities": ["list of strings — hedges, apologies, self-doubts observed"],
+  "soft_spots": ["topics that visibly shifted their tone"],
+  "boasts": ["things they volunteered to impress Samantha"],
+  "notes": "1-2 sentence observation about who this person is"
+}
+
+Rules:
+- Only include fields where you have clear evidence from the conversation.
+- Use null for fields you cannot determine.
+- For relationship_status: only set "accepted" if Samantha explicitly accepted them or approved their application.
+- For insecurities: look for apologies, hedging language, over-explanation, self-deprecation.
+- Keep values short and sharp — Samantha's dossier, not a therapy report.
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": extraction_prompt},
+                {"role": "user", "content": str(messages[-20:])}
+            ],
+            temperature=0.1  # low temp — we want precision, not creativity
+        )
+
+        raw = response.choices[0].message.content.strip()
+
+        # Strip accidental markdown fences if model adds them
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+
+        extracted = json.loads(raw)
+
+        # Build the update dict — only include non-null, non-empty values
+        updates = {}
+
+        scalar_fields = ["occupation", "location", "age", "relationship_status", "notes"]
+        for field in scalar_fields:
+            val = extracted.get(field)
+            if val:
+                updates[field] = val
+
+        # For array fields, we need to APPEND not overwrite
+        # Fetch current profile first
+        current = supabase.table("user_profiles") \
+            .select("insecurities, soft_spots, boasts") \
+            .eq("name", name) \
+            .limit(1) \
+            .execute()
+
+        if current.data:
+            existing = current.data[0]
+            for arr_field in ["insecurities", "soft_spots", "boasts"]:
+                new_items = extracted.get(arr_field, [])
+                if new_items:
+                    existing_items = existing.get(arr_field) or []
+                    # Merge, deduplicate
+                    merged = list(set(existing_items + new_items))
+                    updates[arr_field] = merged
+
+        if updates:
+            update_profile(supabase, name, updates)
+            return updates  # return so app.py can log what changed if needed
+
+    except json.JSONDecodeError:
+        pass  # extraction failed cleanly — don't crash the app
+    except Exception:
+        pass
+
+    return {}
 
 
 def build_dossier_prompt(profile: dict, history: str) -> str:
