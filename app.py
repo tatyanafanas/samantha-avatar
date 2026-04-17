@@ -55,9 +55,36 @@ if "profile" not in st.session_state:
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+# --- NAME GATE ---
+# Ask for name before anything else
+if "user_name" not in st.session_state:
+    st.session_state.user_name = None
 
+if not st.session_state.user_name:
+    name_input = st.text_input(
+        "Before you speak — your name.",
+        placeholder="First name is sufficient."
+    )
+    if name_input:
+        st.session_state.user_name = name_input.strip().title()
+        # Load their dossier immediately
+        profile = get_or_create_profile(supabase, st.session_state.user_name)
+        history = get_conversation_history(supabase, st.session_state.user_name)
+        st.session_state.user_profile_db = profile
+        st.session_state.user_history_db = history
+        st.rerun()
+    st.stop()  # Don't render chat until name is given
+
+# --- INJECT DOSSIER INTO PROMPT ---
+dossier = build_dossier_prompt(
+    st.session_state.user_profile_db,
+    st.session_state.user_history_db
+)
+# Pass dossier into build_system_prompt() instead of the old memory string
 if "last_style" not in st.session_state:
     st.session_state.last_style = None
+
+
 
 # --- GOAL EVOLUTION LOGIC ---
 def update_goal(profile):
