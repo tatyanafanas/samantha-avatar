@@ -16,6 +16,7 @@ from engine.memory import (
     save_session_log,
     extract_and_update_profile,
     build_dossier_prompt,
+    _call_with_fallback as mem_fallback,
 )
 
 # --- PAGE CONFIG ---
@@ -25,7 +26,7 @@ st.set_page_config(page_title="The Iron Diva", layout="wide", page_icon="🥀")
 try:
     with open("config/style.css") as f:
         st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
-except:
+except Exception:
     st.warning("Style file not found. Using default styling.")
 
 # --- CONNECTIONS ---
@@ -74,6 +75,9 @@ if "user_profile_db" not in st.session_state:
 if "user_history_db" not in st.session_state:
     st.session_state.user_history_db = "No prior sessions."
 
+if "opener_injected" not in st.session_state:
+    st.session_state.opener_injected = False
+
 # --- NAME GATE ---
 if not st.session_state.user_name:
     name_input = st.text_input(
@@ -87,18 +91,16 @@ if not st.session_state.user_name:
         st.rerun()
     st.stop()
 
-# --- GOAL EVOLUTION LOGIC ---
+# --- GOAL EVOLUTION ---
 def update_goal(profile):
     sub = profile["submission"]
     irr = profile["irritation"]
-
     if sub > 0.7:
         profile["goal"] = "break_user"
     elif irr > 0.6:
         profile["goal"] = "extract_value"
     else:
         profile["goal"] = "test_intellect"
-
     return profile
 
 # --- MODEL FALLBACK LIST ---
@@ -123,23 +125,79 @@ def call_with_fallback(client, system_prompt, clean_messages):
             return response.choices[0].message.content, model
         except Exception as e:
             error_str = str(e).lower()
-            if any(x in error_str for x in ["rate limit", "429", "quota", "exceeded", "model", "not found", "unavailable"]):
+            if any(x in error_str for x in [
+                "rate limit", "429", "quota", "exceeded",
+                "model", "not found", "unavailable"
+            ]):
                 continue
-            else:
-                raise
+            raise
     raise Exception("All models exhausted.")
+
+# --- RETURNING USER OPENER ---
+def generate_opener(client, profile, dossier):
+    """
+    Generate a cold, in-character opening line for a returning user.
+    Only runs once per session, only if session_count > 1.
+    """
+    session_count = profile.get("session_count", 1)
+    if session_count <= 1:
+        return None
+
+    name = profile.get("name", "")
+    status = profile.get("relationship_status", "stranger")
+    nicknames = profile.get("nicknames", "")
+    notes = profile.get("notes", "")
+
+    opener_instruction = f"""
+{dossier}
+
+{name} has just arrived. This is session #{session_count}. Status: {status}.
+{"You have called them: " + nicknames + "." if nicknames else ""}
+{"Your prior read: " + notes if notes else ""}
+
+Write ONE short opening line — in Samantha's voice.
+- Cold familiarity. Not warmth.
+- Do NOT say "welcome back" or anything hospitable.
+- Do NOT announce that you remember them.
+- Reference something from their history only if it lands with precision.
+- If their status is 'dismissed', let the tone carry that weight.
+- One sentence. No explanation.
+"""
+    try:
+        reply = mem_fallback(
+            client,
+            messages=[
+                {"role": "system", "content": opener_instruction},
+                {"role": "user", "content": "Generate the opening line now."}
+            ],
+            temperature=0.9
+        )
+        return reply.strip() if reply else None
+    except Exception:
+        return None
 
 # --- MAIN LAYOUT ---
 col1, col2 = st.columns([2, 1])
 
-# =======================
-# LEFT: CHAT INTERFACE
-# =======================
 with col1:
     st.title("Samantha T. Okullo")
     st.write("_Raised in the halls of 5-star excellence._")
     st.markdown("---")
 
+    # --- RETURNING USER OPENER (once per session) ---
+    if not st.session_state.opener_injected and client:
+        profile_db = st.session_state.user_profile_db
+        if (profile_db.get("session_count") or 1) > 1:
+            dossier = build_dossier_prompt(profile_db, st.session_state.user_history_db)
+            opener = generate_opener(client, profile_db, dossier)
+            if opener:
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": opener
+                })
+        st.session_state.opener_injected = True
+
+    # Display chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -156,11 +214,10 @@ with col1:
 
         # --- STORE USER MESSAGE ---
         st.session_state.messages.append({"role": "user", "content": prompt})
-
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # --- BUILD DOSSIER / MEMORY ---
+        # --- BUILD DOSSIER ---
         dossier = build_dossier_prompt(
             st.session_state.user_profile_db,
             st.session_state.user_history_db
@@ -177,6 +234,7 @@ with col1:
         system_prompt = (
             build_system_prompt(BIO_MEMORY, TRAITS, st.session_state.profile, dossier)
             + f"""
+---
 CURRENT STYLE: {current_style}
 STYLE DESCRIPTION: {style_data['description']}
 STYLE RULES:
@@ -200,13 +258,11 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
             if model_used != MODELS[0]:
                 st.caption(f"_(running on fallback: {model_used})_")
 
-            # --- STORE ASSISTANT REPLY ---
             st.session_state.messages.append({"role": "assistant", "content": reply})
-
             with st.chat_message("assistant"):
                 st.markdown(reply)
 
-            # --- PERIODIC MEMORY UPDATE (fully protected — never crashes the app) ---
+            # --- PERIODIC MEMORY UPDATE ---
             if len(st.session_state.messages) % 3 == 0:
                 try:
                     summary_prompt = """
@@ -215,7 +271,6 @@ Do NOT reproduce dialogue. Do NOT use roleplay tags. Do NOT simulate conversatio
 Focus on: user personality, what they revealed, power dynamic observed.
 Output plain prose only.
 """
-                    from engine.memory import _call_with_fallback as mem_fallback
                     summary = mem_fallback(
                         client,
                         messages=[
@@ -232,7 +287,7 @@ Output plain prose only.
                             summary
                         )
                 except Exception:
-                    pass  # summary failed silently
+                    pass
 
                 try:
                     extract_and_update_profile(
@@ -242,7 +297,7 @@ Output plain prose only.
                         st.session_state.messages
                     )
                 except Exception:
-                    pass  # extraction failed silently
+                    pass
 
                 try:
                     st.session_state.user_profile_db = get_or_create_profile(
@@ -254,14 +309,12 @@ Output plain prose only.
                         st.session_state.user_name
                     )
                 except Exception:
-                    pass  # dossier reload failed silently
+                    pass
 
         except Exception as e:
             st.error(f"Connection lost: {e}")
 
-# =======================
-# RIGHT: PROFILE PANEL
-# =======================
+# --- RIGHT PANEL ---
 with col2:
     st.markdown("### The Dynasty Dossier")
 
@@ -274,8 +327,21 @@ with col2:
     st.write("**Her Irritation**")
     st.progress(st.session_state.profile["irritation"])
 
-    st.markdown("---")
+    # Show dossier data if available
+    db = st.session_state.user_profile_db
+    if db:
+        st.markdown("---")
+        st.markdown("**Known Intel**")
+        if db.get("relationship_status"):
+            st.caption(f"Status: {db['relationship_status']}")
+        if db.get("session_count"):
+            st.caption(f"Sessions: {db['session_count']}")
+        if db.get("occupation"):
+            st.caption(f"Occupation: {db['occupation']}")
+        if db.get("nicknames"):
+            st.caption(f"Her label: {db['nicknames']}")
 
+    st.markdown("---")
     st.write("**Interaction Protocol:**")
     st.caption("- Address her as 'Miss Samantha' or 'Boss'.")
     st.caption("- Frame success as discipline + hospitality.")
@@ -289,4 +355,5 @@ with col2:
             "goal": "test_intellect"
         }
         st.session_state.session_id = str(uuid.uuid4())
+        st.session_state.opener_injected = False
         st.rerun()
