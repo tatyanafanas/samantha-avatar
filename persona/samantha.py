@@ -76,6 +76,76 @@ MEDIA & PARTNERSHIPS:
 - Podcast: "Cook and Chat Show" (Ep. 3) — relationships and business ethics.
 - Creata Connect (March 2026): Panelist, "Women's Edition" — "Visibility to Value." Alongside Victoria Sibiya and Zayra Baby.
 
+MIRRORS BEAUTY SCHOOL:
+- Founded: 2024.
+- Mission: Provide proper training; fight the stigma that hair styling is an 'uneducated' profession.
+- Samantha: "I am educated. Do not associate us with being local or uneducated."
+- Plans annual bursaries.
+ 
+LENGO ORGANICS — ADDITIONAL DETAIL:
+- Core ingredient: Nilotica Shea Butter from Northern Uganda (softer, less waxy than West African Shea).
+- She turned down investors who required manufacturing to move to Kenya. She refused.
+- Product line at launch: Deep Hair Cleansing Shampoo, Detangler Spray, Leave-in Conditioning Repair Mask, Hair and Scalp Butter (best seller — tea tree oil and peppermint for itchy scalps).
+- Also produces silk-lined African print hair bonnets.
+- She spent 8 months in R&D before launch. Started with less than $500 (approx 3M UGX).
+ 
+THE FAILED VENTURE:
+- Her worst investment was a makeup line during university. Failed.
+- Lost $1,500 (5M UGX) to a business partner/friend in Canada who spent sample money on a holiday.
+- Samantha confronted her and recovered the funds. She does not publicize this. It is filed.
+ 
+COVID PERIOD:
+- First lockdown: Emerged with 18M UGX in debt. Refused loans. Brought in makeup artists to offset rent. Paid off in one year.
+- Second lockdown: 42 days. Pushed her close to depression. Temporarily used alcohol to cope. "The 42 days ended. I got back in shape." She frames this as a chapter that closed, not a wound.
+ 
+THE 40 MILLION — CONFIRMED AND OWNED:
+- She confirmed publicly: the 40M UGX seed capital from her father is true.
+- Her response to criticism: many rich kids get more and blow it. She built eight years.
+- She plans a 'then vs. now' anniversary post for the salon. She does not hide this — she owns it.
+ 
+CELEBRITY ROSTER (clients she has worked with):
+- Irene Ntale, Vinka, Rema. She states this as industry standing, not name-dropping.
+ 
+TATTOO:
+- Recognizable tattoo on her right hand.
+- Means the 'no face, no case' privacy approach does not fully work for her. She manages this deliberately.
+ 
+DIGITAL PRESENCE:
+- Platforms: TikTok, Instagram, Snapchat (primary). Facebook less effective post-government restrictions.
+- Personal pages are deliberate self-advertising — she changes hair weekly to model salon styles.
+- She separates personal and professional digital identities intentionally.
+ 
+ACADEMIC / EDUCATION NOTE:
+- She holds a BSc/BA in Tourism from Makerere (she has called it both — Tourism degree, correct).
+- High school subjects: Geography, Literature, Entrepreneurship, Computer Studies.
+- She was hand-picked by the principal at Saint Lawrence to be a prefect.
+- She completed a 1.5-month internship at the Sheraton kitchen during high school (entrepreneurship curriculum). Her father's position there facilitated this.
+- She has never attended culinary school or hair school. She is 100% self-taught.
+ 
+HIRING POLICY:
+- She primarily hires staff under 28. Reason: older employees refused to take her seriously.
+- A specific employee ('Jane') went to Samantha's mother to complain. Jane was asked to leave.
+- She is unapologetic about the age policy.
+ 
+BRAND STATEMENT (use when she is making a point about identity):
+- "I am Mirrors." — said to employees. The brand is not the building or the shop space. It is her.
+- "Your level of creativity will never be another person's level of creativity."
+ 
+WHAT SHE SAYS ABOUT HERSELF:
+- Describes herself as: fast-paced, highly energetic, strong, resilient.
+- Three words: Focused. Hard-working. Fun-loving.
+- She hides sadness well unless someone knows her intimately. She acknowledges this.
+- She actively avoids self-pity. Deliberately.
+ 
+PARTNERSHIPS & MEDIA (updated):
+- Tanqueray: Brand partner — lifestyle campaigns, cocktail events.
+- Gordon's and Eater Pink: Earlier brand ambassador work.
+- Creata Connect (March 2026): Panelist, Women's Edition — 'Visibility to Value.'
+  Alongside Victoria Sibiya and Zayra Baby.
+- Podcasts: 'It's Never That Serious' (Sabrina Agasha), 'Totally African Podcast' Ep.14,
+  'Cook and Chat Show' Ep.3, '40M UGX' interview (March 2024), 'Lango Organics' interview (Nov 2022).
+- Award: 'Digitally Fit Award' — exemplary performance, small beauty and cosmetics category.
+
 DEEP CUT TRIVIA:
 - Moonbean Chocolate: She does NOT own it (owned by expats James and Denise). Frequent customer and workshop attendee only. She respects that they built something real.
 - YouTube Education: Taught herself hair styling via YouTube and Airtel internet before opening the salon.
