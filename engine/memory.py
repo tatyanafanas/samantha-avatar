@@ -28,10 +28,17 @@ def save_memory(supabase, session_id, summary):
 def summarize_conversation(client, messages):
     try:
         summary_prompt = """
-Summarize this conversation in 5-6 plain sentences about the USER ONLY.
-Do NOT reproduce dialogue. Do NOT use roleplay tags. Do NOT simulate conversation.
-Focus on: user personality, what they revealed, power dynamic observed.
-Output plain prose only.
+Summarize this conversation for Samantha's dossier on this person.
+Extract and label:
+- Name (if given)
+- Occupation or role (if mentioned)
+- Any ambitions they stated
+- Any insecurities, hedges, or apologies
+- Contradictions between what they said at different points
+- Things they said to impress her (boasts)
+- Soft spots: topics that shifted their tone
+
+Be terse. Write it like a psychological profile, not a recap.
 """
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
