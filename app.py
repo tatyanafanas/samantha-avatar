@@ -106,7 +106,9 @@ MODELS = [
     "llama-3.3-70b-versatile",
     "llama-4-scout-17b-16e-instruct",
     "llama-4-maverick-17b-128e-instruct",
-    "qwen-qwq-32b",
+    "gemma2-9b-it",
+    "llama3-8b-8192",
+    "mistral-saba-24b",
     "llama-3.1-8b-instant",
 ]
 
@@ -121,7 +123,7 @@ def call_with_fallback(client, system_prompt, clean_messages):
             return response.choices[0].message.content, model
         except Exception as e:
             error_str = str(e).lower()
-            if any(x in error_str for x in ["rate limit", "429", "quota", "exceeded", "model"]):
+            if any(x in error_str for x in ["rate limit", "429", "quota", "exceeded", "model", "not found", "unavailable"]):
                 continue
             else:
                 raise
@@ -204,25 +206,24 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
             with st.chat_message("assistant"):
                 st.markdown(reply)
 
-            # --- PERIODIC MEMORY UPDATE ---
+            # --- PERIODIC MEMORY UPDATE (fully protected — never crashes the app) ---
             if len(st.session_state.messages) % 3 == 0:
-                # 1. Narrative summary for conversation_logs
-                summary_prompt = """
+                try:
+                    summary_prompt = """
 Summarize this conversation in 5-6 plain sentences about the USER ONLY.
 Do NOT reproduce dialogue. Do NOT use roleplay tags. Do NOT simulate conversation.
 Focus on: user personality, what they revealed, power dynamic observed.
 Output plain prose only.
 """
-                try:
-                    summary_response = client.chat.completions.create(
-                        model=MODELS[0],
+                    from engine.memory import _call_with_fallback as mem_fallback
+                    summary = mem_fallback(
+                        client,
                         messages=[
                             {"role": "system", "content": summary_prompt},
                             {"role": "user", "content": str(st.session_state.messages[-10:])}
                         ],
                         temperature=0.3
                     )
-                    summary = summary_response.choices[0].message.content
                     if summary:
                         save_session_log(
                             supabase,
@@ -230,26 +231,30 @@ Output plain prose only.
                             st.session_state.session_id,
                             summary
                         )
-                except:
-                    pass
+                except Exception:
+                    pass  # summary failed silently
 
-                # 2. Structured extraction → user_profiles
-                extract_and_update_profile(
-                    client,
-                    supabase,
-                    st.session_state.user_name,
-                    st.session_state.messages
-                )
+                try:
+                    extract_and_update_profile(
+                        client,
+                        supabase,
+                        st.session_state.user_name,
+                        st.session_state.messages
+                    )
+                except Exception:
+                    pass  # extraction failed silently
 
-                # 3. Reload the dossier so the running session benefits
-                st.session_state.user_profile_db = get_or_create_profile(
-                    supabase,
-                    st.session_state.user_name
-                )
-                st.session_state.user_history_db = get_conversation_history(
-                    supabase,
-                    st.session_state.user_name
-                )
+                try:
+                    st.session_state.user_profile_db = get_or_create_profile(
+                        supabase,
+                        st.session_state.user_name
+                    )
+                    st.session_state.user_history_db = get_conversation_history(
+                        supabase,
+                        st.session_state.user_name
+                    )
+                except Exception:
+                    pass  # dossier reload failed silently
 
         except Exception as e:
             st.error(f"Connection lost: {e}")
