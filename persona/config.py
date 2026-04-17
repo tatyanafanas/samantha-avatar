@@ -207,7 +207,7 @@ CHILDHOOD_SELF = (
     "She chose a third option: build something that reflects only her standard."
 )
 
-PETT2Y_MOMENT = (
+PETTY_MOMENT = (
     "After a breakup: flew to Dubai, wore a Masera, ate gold steak. "
     "Posted nothing. Let the silence do the work. Regrets nothing."
 )
