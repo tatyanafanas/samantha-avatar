@@ -7,8 +7,8 @@ import random
 import json
 
 # --- IMPORT MODULAR COMPONENTS ---
-from persona.samantha import BIO_MEMORY, TRAITS, STYLES
-from engine.dynamics import analyze_interaction
+from persona.config import STYLES  # styles still live in config
+from engine.dynamics import analyze_interaction, update_goal
 from engine.prompt_builder import build_system_prompt
 from engine.memory import (
     get_or_create_profile,
@@ -18,6 +18,23 @@ from engine.memory import (
     build_dossier_prompt,
     _call_with_fallback as mem_fallback,
 )
+
+# TRAITS is now built inline from config rather than imported as a dict
+from persona.config import (
+    TONE_COLDNESS, TONE_FLIRTINESS, TONE_VULGARITY, TONE_VERBOSITY
+)
+
+TRAITS = {
+    "tone":  f"cold ({TONE_COLDNESS}), flirtatious ({TONE_FLIRTINESS}), vulgar ({TONE_VULGARITY})",
+    "style": "short, cutting sentences — precision over volume",
+    "behavior_rules": [
+        "Always evaluate the person in front of you",
+        "Warmth is a tool — deploy sparingly, retract without warning",
+        "Redirect professional talk to personal immediately",
+        "Plant one seed of doubt per conversation — never resolve it",
+        "Business is context, not conversation",
+    ]
+}
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="The Iron Diva", layout="wide", page_icon="🥀")
@@ -56,8 +73,9 @@ if "profile" not in st.session_state:
     st.session_state.profile = {
         "submission": 0.2,
         "irritation": 0.1,
-        "mood": "Coronated",
-        "goal": "test_intellect"
+        "mood":       "Coronated",
+        "goal":       "learn_them",        # ← updated default goal name
+        "_professional_count": 0,          # ← new: tracks career-talk attempts
     }
 
 if "messages" not in st.session_state:
@@ -91,18 +109,6 @@ if not st.session_state.user_name:
         st.rerun()
     st.stop()
 
-# --- GOAL EVOLUTION ---
-def update_goal(profile):
-    sub = profile["submission"]
-    irr = profile["irritation"]
-    if sub > 0.7:
-        profile["goal"] = "break_user"
-    elif irr > 0.6:
-        profile["goal"] = "extract_value"
-    else:
-        profile["goal"] = "test_intellect"
-    return profile
-
 # --- MODEL FALLBACK LIST ---
 MODELS = [
     "llama-3.3-70b-versatile",
@@ -135,32 +141,28 @@ def call_with_fallback(client, system_prompt, clean_messages):
 
 # --- RETURNING USER OPENER ---
 def generate_opener(client, profile, dossier):
-    """
-    Generate a cold, in-character opening line for a returning user.
-    Only runs once per session, only if session_count > 1.
-    """
     session_count = profile.get("session_count", 1)
     if session_count <= 1:
         return None
 
-    name = profile.get("name", "")
-    status = profile.get("relationship_status", "stranger")
+    name      = profile.get("name", "")
+    status    = profile.get("relationship_status", "stranger")
     nicknames = profile.get("nicknames", "")
-    notes = profile.get("notes", "")
+    notes     = profile.get("notes", "")
 
     opener_instruction = f"""
 {dossier}
 
 {name} has just arrived. This is session #{session_count}. Status: {status}.
-{"You have called them: " + nicknames + "." if nicknames else ""}
+{"You have privately called them: " + nicknames + "." if nicknames else ""}
 {"Your prior read: " + notes if notes else ""}
 
-Write ONE short opening line — in Samantha's voice.
+Write ONE short opening line in Samantha's voice.
 - Cold familiarity. Not warmth.
-- Do NOT say "welcome back" or anything hospitable.
-- Do NOT announce that you remember them.
-- Reference something from their history only if it lands with precision.
-- If their status is 'dismissed', let the tone carry that weight.
+- No "welcome back". Nothing hospitable.
+- Do not announce that you remember them.
+- Reference something personal from their history only if it lands with precision.
+- If their status is 'dismissed', let the tone carry that weight silently.
 - One sentence. No explanation.
 """
     try:
@@ -184,20 +186,16 @@ with col1:
     st.write("_Raised in the halls of 5-star excellence._")
     st.markdown("---")
 
-    # --- RETURNING USER OPENER (once per session) ---
+    # Returning user opener — once per session
     if not st.session_state.opener_injected and client:
         profile_db = st.session_state.user_profile_db
         if (profile_db.get("session_count") or 1) > 1:
             dossier = build_dossier_prompt(profile_db, st.session_state.user_history_db)
-            opener = generate_opener(client, profile_db, dossier)
+            opener  = generate_opener(client, profile_db, dossier)
             if opener:
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": opener
-                })
+                st.session_state.messages.append({"role": "assistant", "content": opener})
         st.session_state.opener_injected = True
 
-    # Display chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -208,31 +206,31 @@ with col1:
             st.error("Missing credentials.")
             st.stop()
 
-        # --- UPDATE STATE ---
+        # Update live session state
         st.session_state.profile = analyze_interaction(st.session_state.profile, prompt)
         st.session_state.profile = update_goal(st.session_state.profile)
 
-        # --- STORE USER MESSAGE ---
+        # Store user message
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # --- BUILD DOSSIER ---
+        # Build dossier
         dossier = build_dossier_prompt(
             st.session_state.user_profile_db,
             st.session_state.user_history_db
         )
 
-        # --- STYLE SELECTION ---
-        STYLE_NAMES = list(STYLES.keys())
-        available_styles = [s for s in STYLE_NAMES if s != st.session_state.last_style]
-        current_style = random.choice(available_styles)
+        # Style selection — avoids repeating last style
+        STYLE_NAMES     = list(STYLES.keys())
+        available       = [s for s in STYLE_NAMES if s != st.session_state.last_style]
+        current_style   = random.choice(available)
         st.session_state.last_style = current_style
-        style_data = STYLES[current_style]
+        style_data      = STYLES[current_style]
 
-        # --- BUILD SYSTEM PROMPT ---
+        # Build system prompt — now passes TRAITS, not BIO_MEMORY separately
         system_prompt = (
-            build_system_prompt(BIO_MEMORY, TRAITS, st.session_state.profile, dossier)
+            build_system_prompt(TRAITS, st.session_state.profile, dossier)
             + f"""
 ---
 CURRENT STYLE: {current_style}
@@ -244,13 +242,11 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
 """
         )
 
-        # --- CLEAN MESSAGE HISTORY ---
         clean_messages = [
             m for m in st.session_state.messages
             if m["role"] in ("user", "assistant") and m["content"].strip()
         ]
 
-        # --- MODEL CALL ---
         try:
             with st.spinner("Miss Samantha is judging your aura..."):
                 reply, model_used = call_with_fallback(client, system_prompt, clean_messages)
@@ -262,13 +258,14 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
             with st.chat_message("assistant"):
                 st.markdown(reply)
 
-            # --- PERIODIC MEMORY UPDATE ---
+            # Periodic memory update — every 3 messages
             if len(st.session_state.messages) % 3 == 0:
                 try:
                     summary_prompt = """
 Summarize this conversation in 5-6 plain sentences about the USER ONLY.
 Do NOT reproduce dialogue. Do NOT use roleplay tags. Do NOT simulate conversation.
-Focus on: user personality, what they revealed, power dynamic observed.
+Focus on: who the person revealed themselves to be, what they protect, what they exposed,
+how they responded to pressure, and the power dynamic observed.
 Output plain prose only.
 """
                     summary = mem_fallback(
@@ -316,9 +313,9 @@ Output plain prose only.
 
 # --- RIGHT PANEL ---
 with col2:
-    st.markdown("### The Dynasty Dossier")
+    st.markdown("### The Dossier")
 
-    st.metric("Current Aura", st.session_state.profile["mood"])
+    st.metric("Current Aura",      st.session_state.profile["mood"])
     st.metric("Current Objective", st.session_state.profile["goal"])
 
     st.write("**Subject Submission**")
@@ -327,7 +324,12 @@ with col2:
     st.write("**Her Irritation**")
     st.progress(st.session_state.profile["irritation"])
 
-    # Show dossier data if available
+    # Professional redirect counter — visible so you can tune config.py
+    pro_count = st.session_state.profile.get("_professional_count", 0)
+    if pro_count > 0:
+        st.write(f"**Career Talk Attempts:** {pro_count}")
+        st.caption("She is keeping count.")
+
     db = st.session_state.user_profile_db
     if db:
         st.markdown("---")
@@ -340,20 +342,25 @@ with col2:
             st.caption(f"Occupation: {db['occupation']}")
         if db.get("nicknames"):
             st.caption(f"Her label: {db['nicknames']}")
+        if db.get("soft_spots"):
+            spots = db["soft_spots"]
+            if isinstance(spots, list):
+                st.caption(f"Soft spots: {', '.join(spots)}")
 
     st.markdown("---")
-    st.write("**Interaction Protocol:**")
+    st.write("**Protocol:**")
     st.caption("- Address her as 'Miss Samantha' or 'Boss'.")
-    st.caption("- Frame success as discipline + hospitality.")
+    st.caption("- She wants to know you, not your job.")
 
     if st.button("Reset Interaction"):
         st.session_state.messages = []
-        st.session_state.profile = {
+        st.session_state.profile  = {
             "submission": 0.2,
             "irritation": 0.1,
-            "mood": "Observing",
-            "goal": "test_intellect"
+            "mood":       "Observing",
+            "goal":       "learn_them",
+            "_professional_count": 0,
         }
-        st.session_state.session_id = str(uuid.uuid4())
+        st.session_state.session_id     = str(uuid.uuid4())
         st.session_state.opener_injected = False
         st.rerun()
