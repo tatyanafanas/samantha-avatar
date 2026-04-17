@@ -1,11 +1,11 @@
 import re
 
-# Common single-word typos / shorthand she'd find offensive
+# Shorthand / lazy language Samantha finds offensive
 TYPO_PATTERNS = [
-    r'\bu\b',           # "u" instead of "you"
-    r'\br\b',           # "r" instead of "are"
-    r'\bur\b',          # "ur"
-    r'\bpls\b',         # "pls"
+    r'\bu\b',       # "u" instead of "you"
+    r'\br\b',       # "r" instead of "are"
+    r'\bur\b',
+    r'\bpls\b',
     r'\bplz\b',
     r'\btbh\b',
     r'\bidk\b',
@@ -15,28 +15,26 @@ TYPO_PATTERNS = [
     r'\blol\b',
     r'\blmao\b',
     r'\bomg\b',
+    r'\bomfg\b',
     r'\bwanna\b',
     r'\bgonna\b',
     r'\bgotta\b',
     r'\bcuz\b',
-    r'\bcos\b',
+    r'\bcoz\b',
     r'\bcos\b',
     r'\bthru\b',
-    r'\bw/\b',          # "w/" instead of "with"
-    r'\bb4\b',          # "b4" instead of "before"
+    r'\bw/\b',
+    r'\bb4\b',
     r'\b4ever\b',
-    r'\bngl\b',
     r'\bsmh\b',
-    r'\bfr\b',          # "fr" = "for real"
+    r'\bfr\b',
     r'\bnvm\b',
     r'\bwdym\b',
     r'\bwtf\b',
-    r'\bomfg\b',
 ]
 
-# Regex: repeated characters suggesting typo (e.g. "teh", "hte", double-spaced words)
 DOUBLE_SPACE = re.compile(r'  +')
-REPEATED_CHAR = re.compile(r'(.)\1{3,}')  # 4+ of the same char
+REPEATED_CHAR = re.compile(r'(.)\1{3,}')  # 4+ of same char in a row
 
 
 def has_sloppy_language(text: str) -> bool:
@@ -76,8 +74,8 @@ def analyze_interaction(profile, text):
     if word_count < 5:
         profile["irritation"] += 0.1
 
-    tedious = ["hi", "hey", "hello", "what's up", "haha", "lol", "okay so"]
-    if any(text_lower.startswith(t) for t in tedious):
+    tedious_openers = ["hi", "hey", "hello", "what's up", "haha", "lol", "okay so"]
+    if any(text_lower.startswith(t) for t in tedious_openers):
         profile["irritation"] += 0.05
 
     strong_signals = [
@@ -88,20 +86,23 @@ def analyze_interaction(profile, text):
         profile["irritation"] -= 0.07
         profile["submission"] = max(profile["submission"] - 0.05, 0)
 
-    vague = ["passion", "vibe", "energy", "dream", "someday", "one day", "when the time is right"]
-    if any(v in text_lower for v in vague):
+    vague_words = [
+        "passion", "vibe", "energy", "dream", "someday",
+        "one day", "when the time is right"
+    ]
+    if any(v in text_lower for v in vague_words):
         profile["irritation"] += 0.06
 
-    # --- SLOPPY LANGUAGE / TYPOS ---
+    # --- SLOPPY LANGUAGE ---
     if has_sloppy_language(text):
         profile["irritation"] += 0.12
-        profile["submission"] += 0.04  # sloppiness reads as low-effort = low status
+        profile["submission"] += 0.04
 
-    # --- CLAMP VALUES ---
+    # --- CLAMP ---
     profile["submission"] = round(min(max(profile["submission"], 0.0), 1.0), 3)
     profile["irritation"] = round(min(max(profile["irritation"], 0.0), 1.0), 3)
 
-    # --- MOOD LOGIC ---
+    # --- MOOD ---
     sub = profile["submission"]
     irr = profile["irritation"]
 
