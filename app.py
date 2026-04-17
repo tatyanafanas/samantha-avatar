@@ -4,6 +4,8 @@ from openai import OpenAI
 import time
 import uuid
 import random
+import json
+
 
 # --- IMPORT MODULAR COMPONENTS ---
 from persona.samantha import BIO_MEMORY, TRAITS
@@ -202,12 +204,37 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
 
             # --- PERIODIC MEMORY UPDATE ---
             if len(st.session_state.messages) % 3 == 0:
+    # 1. Narrative summary for conversation_logs
                 summary = summarize_conversation(client, st.session_state.messages)
                 if summary:
-                    save_memory(supabase, st.session_state.session_id, summary)
-
-            time.sleep(0.1)
-            st.rerun()
+                    save_session_log(
+                        supabase,
+                        st.session_state.user_name,
+                        st.session_state.session_id,
+                        summary
+                    )
+            
+                # 2. Structured extraction → user_profiles
+                if st.session_state.get("user_name"):
+                    extract_and_update_profile(
+                        client,
+                        supabase,
+                        st.session_state.user_name,
+                        st.session_state.messages
+                    )
+            
+                    # 3. Reload the dossier so the running session also benefits
+                    st.session_state.user_profile_db = get_or_create_profile(
+                        supabase,
+                        st.session_state.user_name
+                    )
+                    st.session_state.user_history_db = get_conversation_history(
+                        supabase,
+                        st.session_state.user_name
+                    )
+            
+                        time.sleep(0.1)
+                        st.rerun()
 
         except Exception as e:
             st.error(f"Connection lost: {e}")
