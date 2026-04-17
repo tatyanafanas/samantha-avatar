@@ -121,10 +121,37 @@ def save_session_log(supabase, name: str, session_id: str, summary: str):
         pass
 
 
+def _append_note(existing_notes: str | None, new_note: str | None) -> str | None:
+    """
+    Append a new observation to the existing notes string.
+    Notes are stored as a single text column in Supabase — plain text,
+    never an array — so we concatenate with a dated separator.
+
+    Returns None if there is nothing new to write.
+    """
+    if not new_note:
+        return None
+
+    new_note = new_note.strip()
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    if existing_notes:
+        # Avoid appending exact duplicates
+        if new_note in existing_notes:
+            return None
+        return f"{existing_notes.rstrip()}\n[{date_str}] {new_note}"
+    else:
+        return f"[{date_str}] {new_note}"
+
+
 def extract_and_update_profile(client, supabase, name: str, messages: list):
     """
     Runs a structured extraction pass over recent messages.
     Pulls out profile-worthy signals and writes them to user_profiles.
+
+    NOTES FIELD: always appended, never overwritten.
+    All other scalar fields: overwrite only if a non-null value is extracted.
+    All array fields (insecurities, soft_spots, boasts): merged, deduplicated.
     """
     extraction_prompt = """
 You are a silent analyst reading a conversation between a user and Samantha.
@@ -138,20 +165,21 @@ Schema:
   "location": "string or null",
   "age": "string or null",
   "relationship_status": "one of: stranger / applicant / accepted / dismissed — or null if unchanged",
-  "nicknames": "any nickname Samantha assigned to this person during conversation, or null",
+  "nicknames": "any nickname Samantha assigned to this person, or null",
   "insecurities": ["list of strings — hedges, apologies, self-doubts observed"],
   "soft_spots": ["topics that visibly shifted their tone"],
   "boasts": ["things they volunteered to impress Samantha"],
-  "notes": "1-2 sentence sharp observation about who this person is"
+  "notes": "1-2 sentence sharp NEW observation about this person not previously noted — or null if nothing new"
 }
 
 Rules:
-- Only include fields where you have clear evidence from the conversation.
+- Only include fields where you have clear evidence from THIS conversation.
 - Use null for fields you cannot determine.
-- For relationship_status: only set "accepted" if Samantha explicitly accepted them.
-- For nicknames: only set if Samantha actually coined or used a specific label for this person.
-- For insecurities: look for apologies, hedging, over-explanation, self-deprecation.
-- Keep values short and sharp.
+- relationship_status: only set "accepted" if Samantha explicitly accepted them.
+- nicknames: only set if Samantha actually coined or used a specific label.
+- insecurities: apologies, hedging, over-explanation, self-deprecation.
+- notes: write something NEW and precise. If you have nothing new, return null.
+- Keep all values short and sharp.
 """
 
     try:
@@ -177,27 +205,52 @@ Rules:
         extracted = json.loads(raw)
         updates = {}
 
-        scalar_fields = ["occupation", "location", "age", "relationship_status", "notes", "nicknames"]
+        # ── Scalar fields — overwrite if we have a value ──────────
+        scalar_fields = ["occupation", "location", "age", "relationship_status", "nicknames"]
         for field in scalar_fields:
             val = extracted.get(field)
             if val:
                 updates[field] = val
 
-        # For array fields, APPEND not overwrite
+        # ── notes — APPEND, never overwrite ───────────────────────
+        # Fetch the current value first, then append the new observation.
+        new_note = extracted.get("notes")
+        if new_note:
+            try:
+                current_res = supabase.table("user_profiles") \
+                    .select("notes") \
+                    .eq("name", name) \
+                    .limit(1) \
+                    .execute()
+
+                existing_notes = None
+                if current_res.data:
+                    existing_notes = current_res.data[0].get("notes")
+
+                appended = _append_note(existing_notes, new_note)
+                if appended is not None:
+                    updates["notes"] = appended
+
+            except Exception:
+                # If fetch fails, still try to write the new note on its own
+                updates["notes"] = f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d')}] {new_note}"
+
+        # ── Array fields — merge and deduplicate ──────────────────
         try:
-            current = supabase.table("user_profiles") \
+            arr_res = supabase.table("user_profiles") \
                 .select("insecurities, soft_spots, boasts") \
                 .eq("name", name) \
                 .limit(1) \
                 .execute()
 
-            if current.data:
-                existing = current.data[0]
+            if arr_res.data:
+                existing = arr_res.data[0]
                 for arr_field in ["insecurities", "soft_spots", "boasts"]:
                     new_items = extracted.get(arr_field, [])
                     if new_items:
                         existing_items = existing.get(arr_field) or []
-                        merged = list(set(existing_items + new_items))
+                        merged = list(dict.fromkeys(existing_items + new_items))
+                        # dict.fromkeys preserves order and deduplicates
                         updates[arr_field] = merged
         except Exception:
             pass
@@ -217,13 +270,13 @@ Rules:
 def build_returning_user_context(profile: dict) -> str:
     """
     Returns an in-character instruction block for how Samantha
-    should open with a returning user. Cold familiarity — not warmth.
+    should open with a returning user.
     """
-    status = profile.get("relationship_status", "stranger")
-    name = profile.get("name", "them")
+    status        = profile.get("relationship_status", "stranger")
+    name          = profile.get("name", "them")
     session_count = profile.get("session_count", 1)
-    nicknames = profile.get("nicknames")
-    notes = profile.get("notes", "")
+    nicknames     = profile.get("nicknames")
+    notes         = profile.get("notes", "")
 
     if status == "stranger" or session_count <= 1:
         return "This person is new. You have no prior read on them. Start from zero."
@@ -240,7 +293,7 @@ def build_returning_user_context(profile: dict) -> str:
         )
 
     if notes:
-        lines.append(f"Your prior read on them: {notes}")
+        lines.append(f"Your accumulated read on them:\n{notes}")
 
     lines += [
         "You remember them. Do not pretend otherwise.",
@@ -255,7 +308,7 @@ def build_returning_user_context(profile: dict) -> str:
 
 def build_dossier_prompt(profile: dict, history: str) -> str:
     """Render the full dossier block for prompt injection."""
-    status = profile.get("relationship_status", "stranger")
+    status        = profile.get("relationship_status", "stranger")
     session_count = profile.get("session_count", 1)
 
     lines = [
@@ -273,10 +326,9 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
     if profile.get("nicknames"):
         lines.append(f"Your label for them: {profile['nicknames']}")
 
-    # Safe join for array fields that may be None from Supabase
     insecurities = profile.get("insecurities") or []
-    soft_spots = profile.get("soft_spots") or []
-    boasts = profile.get("boasts") or []
+    soft_spots   = profile.get("soft_spots") or []
+    boasts       = profile.get("boasts") or []
 
     if insecurities:
         lines.append(f"Insecurities: {', '.join(insecurities)}")
@@ -284,10 +336,12 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
         lines.append(f"Soft spots: {', '.join(soft_spots)}")
     if boasts:
         lines.append(f"Boasts: {', '.join(boasts)}")
-    if profile.get("notes"):
-        lines.append(f"Notes: {profile['notes']}")
 
-    # Returning user context block
+    # Notes are now multi-line / dated — render them clearly
+    if profile.get("notes"):
+        lines.append("Observations:")
+        lines.append(profile["notes"])
+
     returning_context = build_returning_user_context(profile)
 
     lines += [
@@ -300,9 +354,9 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
         "",
         "MEMORY RULES:",
         "- You know this person. Behave accordingly.",
-        "- Status is real. If they are 'accepted', they earned it — but the standard never drops.",
-        "- If they are 'dismissed', let them feel it without announcing it.",
-        "- Use prior session details as leverage, not warmth.",
+        "- Status is real. 'accepted' means they earned it — standard never drops.",
+        "- 'dismissed' — let them feel it without announcing it.",
+        "- Use prior details as leverage, not warmth.",
         "- Do not announce what you remember. Let it surface naturally.",
         "- Their label/nickname is yours. Use it when it cuts, not as greeting.",
         "- If status is 'stranger', they start from zero.",
