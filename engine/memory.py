@@ -1,3 +1,6 @@
+import json
+
+
 def get_or_create_profile(supabase, name: str) -> dict:
     """Load existing profile or create a fresh one."""
     try:
