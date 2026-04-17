@@ -1,12 +1,34 @@
 import json
 
+
 SUMMARY_MODELS = [
     "llama-3.3-70b-versatile",
-    "llama-4-scout-17b-16e-instruct", 
+    "llama-4-scout-17b-16e-instruct",
     "llama-4-maverick-17b-128e-instruct",
     "gemma2-9b-it",
+    "llama3-8b-8192",
+    "mistral-saba-24b",
     "llama-3.1-8b-instant",
 ]
+
+
+def _call_with_fallback(client, messages, temperature=0.3):
+    """Try each model in SUMMARY_MODELS until one succeeds."""
+    for model in SUMMARY_MODELS:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(x in error_str for x in ["rate limit", "429", "quota", "exceeded", "model", "not found", "unavailable"]):
+                continue
+            raise
+    return None
+
 
 def get_or_create_profile(supabase, name: str) -> dict:
     """Load existing profile or create a fresh one."""
@@ -21,7 +43,6 @@ def get_or_create_profile(supabase, name: str) -> dict:
     except:
         pass
 
-    # Create new profile
     new_profile = {"name": name, "relationship_status": "stranger"}
     try:
         supabase.table("user_profiles").insert(new_profile).execute()
@@ -58,8 +79,6 @@ def get_conversation_history(supabase, name: str, limit: int = 3) -> str:
     return "No prior sessions."
 
 
-
-
 def save_session_log(supabase, name: str, session_id: str, summary: str):
     """Append a session summary to conversation_logs."""
     try:
@@ -70,6 +89,7 @@ def save_session_log(supabase, name: str, session_id: str, summary: str):
         }).execute()
     except:
         pass
+
 
 def extract_and_update_profile(client, supabase, name: str, messages: list):
     """
@@ -103,18 +123,19 @@ Rules:
 """
 
     try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+        raw = _call_with_fallback(
+            client,
             messages=[
                 {"role": "system", "content": extraction_prompt},
                 {"role": "user", "content": str(messages[-20:])}
             ],
-            temperature=0.1  # low temp — we want precision, not creativity
+            temperature=0.1
         )
 
-        raw = response.choices[0].message.content.strip()
+        if not raw:
+            return {}
 
-        # Strip accidental markdown fences if model adds them
+        # Strip accidental markdown fences
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -123,7 +144,6 @@ Rules:
 
         extracted = json.loads(raw)
 
-        # Build the update dict — only include non-null, non-empty values
         updates = {}
 
         scalar_fields = ["occupation", "location", "age", "relationship_status", "notes"]
@@ -132,8 +152,7 @@ Rules:
             if val:
                 updates[field] = val
 
-        # For array fields, we need to APPEND not overwrite
-        # Fetch current profile first
+        # For array fields, APPEND not overwrite
         current = supabase.table("user_profiles") \
             .select("insecurities, soft_spots, boasts") \
             .eq("name", name) \
@@ -146,40 +165,25 @@ Rules:
                 new_items = extracted.get(arr_field, [])
                 if new_items:
                     existing_items = existing.get(arr_field) or []
-                    # Merge, deduplicate
                     merged = list(set(existing_items + new_items))
                     updates[arr_field] = merged
 
         if updates:
             update_profile(supabase, name, updates)
-            return updates  # return so app.py can log what changed if needed
+            return updates
 
     except json.JSONDecodeError:
-        pass  # extraction failed cleanly — don't crash the app
+        pass
     except Exception:
         pass
-    def _call_with_fallback(client, messages, temperature=0.3):
-    for model in SUMMARY_MODELS:
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            error_str = str(e).lower()
-            if any(x in error_str for x in ["rate limit", "429", "quota", "exceeded", "model"]):
-                continue
-            raise
-    return None
+
     return {}
 
 
 def build_dossier_prompt(profile: dict, history: str) -> str:
     """Render the full dossier block for prompt injection."""
     status = profile.get("relationship_status", "stranger")
-    
+
     lines = [
         f"USER DOSSIER — {profile.get('name', 'Unknown')}",
         f"Status: {status}",
