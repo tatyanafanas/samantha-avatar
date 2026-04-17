@@ -1,23 +1,58 @@
-def get_memory(supabase, session_id):
+def get_or_create_profile(supabase, name: str) -> dict:
+    """Load existing profile or create a fresh one."""
     try:
-        res = supabase.table("samantha_memory") \
-            .select("summary") \
-            .eq("session_id", session_id) \
-            .order("created_at", desc=True) \
+        res = supabase.table("user_profiles") \
+            .select("*") \
+            .eq("name", name) \
             .limit(1) \
             .execute()
-
         if res.data:
-            return res.data[0]["summary"]
+            return res.data[0]
     except:
         pass
 
-    return "No prior memory."
-
-
-def save_memory(supabase, session_id, summary):
+    # Create new profile
+    new_profile = {"name": name, "relationship_status": "stranger"}
     try:
-        supabase.table("samantha_memory").insert({
+        supabase.table("user_profiles").insert(new_profile).execute()
+    except:
+        pass
+    return new_profile
+
+
+def update_profile(supabase, name: str, updates: dict):
+    """Patch fields on an existing profile."""
+    try:
+        supabase.table("user_profiles") \
+            .update({**updates, "updated_at": "NOW()"}) \
+            .eq("name", name) \
+            .execute()
+    except:
+        pass
+
+
+def get_conversation_history(supabase, name: str, limit: int = 3) -> str:
+    """Fetch the last N session summaries for this user."""
+    try:
+        res = supabase.table("conversation_logs") \
+            .select("summary, created_at") \
+            .eq("user_name", name) \
+            .order("created_at", desc=True) \
+            .limit(limit) \
+            .execute()
+        if res.data:
+            entries = [f"[{r['created_at'][:10]}] {r['summary']}" for r in res.data]
+            return "\n---\n".join(entries)
+    except:
+        pass
+    return "No prior sessions."
+
+
+def save_session_log(supabase, name: str, session_id: str, summary: str):
+    """Append a session summary to conversation_logs."""
+    try:
+        supabase.table("conversation_logs").insert({
+            "user_name": name,
             "session_id": session_id,
             "summary": summary
         }).execute()
@@ -25,31 +60,37 @@ def save_memory(supabase, session_id, summary):
         pass
 
 
-def summarize_conversation(client, messages):
-    try:
-        summary_prompt = """
-Summarize this conversation for Samantha's dossier on this person.
-Extract and label:
-- Name (if given)
-- Occupation or role (if mentioned)
-- Any ambitions they stated
-- Any insecurities, hedges, or apologies
-- Contradictions between what they said at different points
-- Things they said to impress her (boasts)
-- Soft spots: topics that shifted their tone
+def build_dossier_prompt(profile: dict, history: str) -> str:
+    """Render the full dossier block for prompt injection."""
+    status = profile.get("relationship_status", "stranger")
+    
+    lines = [
+        f"USER DOSSIER — {profile.get('name', 'Unknown')}",
+        f"Status: {status}",
+    ]
+    if profile.get("occupation"):
+        lines.append(f"Occupation: {profile['occupation']}")
+    if profile.get("location"):
+        lines.append(f"Location: {profile['location']}")
+    if profile.get("insecurities"):
+        lines.append(f"Insecurities: {', '.join(profile['insecurities'])}")
+    if profile.get("soft_spots"):
+        lines.append(f"Soft spots: {', '.join(profile['soft_spots'])}")
+    if profile.get("boasts"):
+        lines.append(f"Boasts: {', '.join(profile['boasts'])}")
+    if profile.get("notes"):
+        lines.append(f"Notes: {profile['notes']}")
 
-Be terse. Write it like a psychological profile, not a recap.
-"""
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": summary_prompt},
-                {"role": "user", "content": str(messages[-10:])}
-            ],
-            temperature=0.3
-        )
-
-        return response.choices[0].message.content
-
-    except:
-        return None
+    lines += [
+        "",
+        "PRIOR SESSIONS:",
+        history,
+        "",
+        "MEMORY RULES:",
+        "- You know this person. Behave accordingly.",
+        "- Their status is real. If they are 'accepted', they earned it — treat them accordingly, but never let them forget the standard.",
+        "- Use prior session details as leverage, not warmth.",
+        "- Do not announce what you remember. Let it surface naturally.",
+        "- If status is 'stranger', they start from zero.",
+    ]
+    return "\n".join(lines)
