@@ -1,5 +1,12 @@
 import json
 
+SUMMARY_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama-4-scout-17b-16e-instruct", 
+    "llama-4-maverick-17b-128e-instruct",
+    "gemma2-9b-it",
+    "llama-3.1-8b-instant",
+]
 
 def get_or_create_profile(supabase, name: str) -> dict:
     """Load existing profile or create a fresh one."""
@@ -151,7 +158,21 @@ Rules:
         pass  # extraction failed cleanly — don't crash the app
     except Exception:
         pass
-
+    def _call_with_fallback(client, messages, temperature=0.3):
+    for model in SUMMARY_MODELS:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(x in error_str for x in ["rate limit", "429", "quota", "exceeded", "model"]):
+                continue
+            raise
+    return None
     return {}
 
 
