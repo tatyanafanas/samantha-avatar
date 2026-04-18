@@ -5,6 +5,7 @@ import time
 import uuid
 import random
 import json
+import time
 
 # --- IMPORT MODULAR COMPONENTS ---
 from persona.config import STYLES  # styles still live in config
@@ -114,17 +115,17 @@ if not st.session_state.user_name:
 
 # --- MODEL FALLBACK LIST ---
 MODELS = [
-    "llama-3.3-70b-versatile",
-    "llama-4-scout-17b-16e-instruct",
-    "llama-4-maverick-17b-128e-instruct",
-    "gemma2-9b-it",
-    "llama3-8b-8192",
-    "mistral-saba-24b",
-    "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile",          # best quality, keep first
+    "meta-llama/llama-4-scout-17b-16e-instruct",  # fast preview, good quality
+    "openai/gpt-oss-20b",               # 1000 t/s, very fast fallback
+    "openai/gpt-oss-120b",              # powerful, slower
+    "qwen/qwen3-32b",                   # solid preview model
+    "llama-3.1-8b-instant",             # lightest, last resort
 ]
 
+
 def call_with_fallback(client, system_prompt, clean_messages):
-    for model in MODELS:
+    for i, model in enumerate(MODELS):
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -134,14 +135,19 @@ def call_with_fallback(client, system_prompt, clean_messages):
             return response.choices[0].message.content, model
         except Exception as e:
             error_str = str(e).lower()
-            if any(x in error_str for x in [
-                "rate limit", "429", "quota", "exceeded",
-                "model", "not found", "unavailable"
-            ]):
+            is_rate_limit = any(x in error_str for x in ["rate limit", "429", "quota", "exceeded"])
+            is_unavailable = any(x in error_str for x in ["model", "not found", "unavailable", "deprecated"])
+            
+            if is_rate_limit:
+                wait = min(2 ** i, 16)  # 1s, 2s, 4s, 8s, 16s...
+                time.sleep(wait)
                 continue
-            raise
+            elif is_unavailable:
+                continue  # try next model immediately
+            else:
+                raise  # unexpected error, surface it
     raise Exception("All models exhausted.")
-
+    
 # --- RETURNING USER OPENER ---
 def generate_opener(client, profile, dossier):
     session_count = profile.get("session_count", 1)
