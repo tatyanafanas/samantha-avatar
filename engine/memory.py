@@ -1,41 +1,43 @@
 import json
+import time
 from datetime import datetime, timezone
+
 
 
 SUMMARY_MODELS = [
     "llama-3.3-70b-versatile",
-    "llama-4-scout-17b-16e-instruct",
-    "llama-4-maverick-17b-128e-instruct",
-    "gemma2-9b-it",
-    "llama3-8b-8192",
-    "mistral-saba-24b",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "qwen/qwen3-32b",
     "llama-3.1-8b-instant",
 ]
 
 
-def call_with_fallback(client, system_prompt, clean_messages):
-    for i, model in enumerate(MODELS):
+def _call_with_fallback(client, messages, temperature=0.3):
+    """Try each model in SUMMARY_MODELS until one succeeds."""
+    for i, model in enumerate(SUMMARY_MODELS):
         try:
             response = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "system", "content": system_prompt}] + clean_messages,
-                temperature=0.85
+                messages=messages,
+                temperature=temperature
             )
-            return response.choices[0].message.content, model
+            return response.choices[0].message.content
         except Exception as e:
             error_str = str(e).lower()
             is_rate_limit = any(x in error_str for x in ["rate limit", "429", "quota", "exceeded"])
             is_unavailable = any(x in error_str for x in ["model", "not found", "unavailable", "deprecated"])
             
             if is_rate_limit:
-                wait = min(2 ** i, 16)  # 1s, 2s, 4s, 8s, 16s...
+                wait = min(2 ** i, 16)
                 time.sleep(wait)
                 continue
             elif is_unavailable:
-                continue  # try next model immediately
+                continue
             else:
-                raise  # unexpected error, surface it
-    raise Exception("All models exhausted.")
+                raise
+    return None
 
 
 def get_or_create_profile(supabase, name: str) -> dict:
