@@ -13,25 +13,29 @@ SUMMARY_MODELS = [
 ]
 
 
-def _call_with_fallback(client, messages, temperature=0.3):
-    """Try each model in SUMMARY_MODELS until one succeeds."""
-    for model in SUMMARY_MODELS:
+def call_with_fallback(client, system_prompt, clean_messages):
+    for i, model in enumerate(MODELS):
         try:
             response = client.chat.completions.create(
                 model=model,
-                messages=messages,
-                temperature=temperature
+                messages=[{"role": "system", "content": system_prompt}] + clean_messages,
+                temperature=0.85
             )
-            return response.choices[0].message.content
+            return response.choices[0].message.content, model
         except Exception as e:
             error_str = str(e).lower()
-            if any(x in error_str for x in [
-                "rate limit", "429", "quota", "exceeded",
-                "model", "not found", "unavailable"
-            ]):
+            is_rate_limit = any(x in error_str for x in ["rate limit", "429", "quota", "exceeded"])
+            is_unavailable = any(x in error_str for x in ["model", "not found", "unavailable", "deprecated"])
+            
+            if is_rate_limit:
+                wait = min(2 ** i, 16)  # 1s, 2s, 4s, 8s, 16s...
+                time.sleep(wait)
                 continue
-            raise
-    return None
+            elif is_unavailable:
+                continue  # try next model immediately
+            else:
+                raise  # unexpected error, surface it
+    raise Exception("All models exhausted.")
 
 
 def get_or_create_profile(supabase, name: str) -> dict:
