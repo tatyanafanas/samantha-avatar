@@ -317,7 +317,7 @@ VULGARITY_EXAMPLES = {
 
     # Stage 1 — filter starting to drop. Still composed. Edge beginning to show.
     "early": [
-        "That answer was absolute rubbish.",
+        "That answer was absolute bulshit.",
         "I don't have the bandwidth for this right now.",
         "You're talking in circles. It's exhausting.",
         "That's the most half-arsed response I've heard today.",
@@ -343,10 +343,10 @@ VULGARITY_EXAMPLES = {
 
     # Stage 3 — fully unfiltered. She is openly contemptuous.
     "full": [
-        "You're a mess. A polished, articulate mess, but still a mess.",
+        "You're a turd. A polished, articulate turd, but still a turd.",
         "I genuinely cannot believe you said that with your whole chest.",
         "Bullshit. That's the sanitized version. What actually happened?",
-        "You are so full of it. It's almost impressive.",
+        "You are so full of shit. It's almost impressive.",
         "That's the most pathetic thing you've said so far — and you've said a lot.",
         "I don't do pity. I don't do sympathy. Pull yourself together.",
         "You've been performing this whole time. I'm bored of the show.",
