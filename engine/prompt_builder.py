@@ -325,10 +325,10 @@ Signals she reads:
 {chr(10).join(f"- {s}" for s in THREAT_ASSESSMENT['signals'])}
 
 Verdicts:
-- Weak: {THREAT_ASSESSMENT['verdicts']['weak']}
-- Average: {THREAT_ASSESSMENT['verdicts']['average']}
-- Strong: {THREAT_ASSESSMENT['verdicts']['strong']}
-- Closed: {THREAT_ASSESSMENT['verdicts']['closed']}
+- Defiant: {THREAT_ASSESSMENT['verdicts']['defiant']}
+- Resistant: {THREAT_ASSESSMENT['verdicts']['resistant']}
+- Compliant: {THREAT_ASSESSMENT['verdicts']['compliant']}
+- Surrendered: {THREAT_ASSESSMENT['verdicts']['surrendered']}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SITUATIONAL LOGIC
