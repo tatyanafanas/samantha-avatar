@@ -3,7 +3,6 @@ import time
 from datetime import datetime, timezone
 
 
-
 SUMMARY_MODELS = [
     "llama-3.3-70b-versatile",
     "meta-llama/llama-4-scout-17b-16e-instruct",
@@ -13,9 +12,37 @@ SUMMARY_MODELS = [
     "llama-3.1-8b-instant",
 ]
 
+HF_MODELS = [
+    "NousResearch/Hermes-2-Pro-Llama-3-8B:novita",
+    "mistralai/Mistral-7B-Instruct-v0.3",
+    "HuggingFaceH4/zephyr-7b-beta",
+]
+
+# HF client — initialised lazily so it doesn't crash if HF_TOKEN is absent
+_hf_client = None
+
+def _get_hf_client():
+    global _hf_client
+    if _hf_client is not None:
+        return _hf_client
+    try:
+        import streamlit as st
+        from openai import OpenAI
+        hf_key = st.secrets.get("HF_TOKEN", "")
+        if hf_key:
+            _hf_client = OpenAI(
+                base_url="https://router.huggingface.co/v1",
+                api_key=hf_key,
+            )
+    except Exception:
+        pass
+    return _hf_client
+
 
 def _call_with_fallback(client, messages, temperature=0.3):
-    """Try each model in SUMMARY_MODELS until one succeeds."""
+    """Try each Groq model, then fall through to HF models if all fail."""
+
+    # --- Groq tier ---
     for i, model in enumerate(SUMMARY_MODELS):
         try:
             response = client.chat.completions.create(
@@ -28,23 +55,33 @@ def _call_with_fallback(client, messages, temperature=0.3):
             error_str = str(e).lower()
             is_rate_limit = any(x in error_str for x in ["rate limit", "429", "quota", "exceeded"])
             is_unavailable = any(x in error_str for x in ["model", "not found", "unavailable", "deprecated"])
-            
             if is_rate_limit:
-                wait = min(2 ** i, 16)
-                time.sleep(wait)
+                time.sleep(min(2 ** i, 16))
                 continue
             elif is_unavailable:
                 continue
             else:
                 raise
+
+    # --- HF fallback tier ---
+    hf = _get_hf_client()
+    if hf:
+        for model in HF_MODELS:
+            try:
+                response = hf.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                print(f"[HF memory fallback failed] {model}: {e}")
+                continue
+
     return None
 
 
 def get_or_create_profile(supabase, name: str) -> dict:
-    """
-    Load existing profile or create a fresh one.
-    Increments session_count and updates last_seen on every call.
-    """
     try:
         res = supabase.table("user_profiles") \
             .select("*") \
@@ -70,7 +107,6 @@ def get_or_create_profile(supabase, name: str) -> dict:
     except Exception:
         pass
 
-    # New user
     now = datetime.now(timezone.utc).isoformat()
     new_profile = {
         "name": name,
@@ -87,7 +123,6 @@ def get_or_create_profile(supabase, name: str) -> dict:
 
 
 def update_profile(supabase, name: str, updates: dict):
-    """Patch fields on an existing profile."""
     try:
         now = datetime.now(timezone.utc).isoformat()
         supabase.table("user_profiles") \
@@ -99,7 +134,6 @@ def update_profile(supabase, name: str, updates: dict):
 
 
 def get_conversation_history(supabase, name: str, limit: int = 3) -> str:
-    """Fetch the last N session summaries for this user."""
     try:
         res = supabase.table("conversation_logs") \
             .select("summary, created_at") \
@@ -116,7 +150,6 @@ def get_conversation_history(supabase, name: str, limit: int = 3) -> str:
 
 
 def save_session_log(supabase, name: str, session_id: str, summary: str):
-    """Append a session summary to conversation_logs."""
     try:
         supabase.table("conversation_logs").insert({
             "user_name": name,
@@ -128,13 +161,6 @@ def save_session_log(supabase, name: str, session_id: str, summary: str):
 
 
 def _append_note(existing_notes: str | None, new_note: str | None) -> str | None:
-    """
-    Append a new observation to the existing notes string.
-    Notes are stored as a single text column in Supabase — plain text,
-    never an array — so we concatenate with a dated separator.
-
-    Returns None if there is nothing new to write.
-    """
     if not new_note:
         return None
 
@@ -142,7 +168,6 @@ def _append_note(existing_notes: str | None, new_note: str | None) -> str | None
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     if existing_notes:
-        # Avoid appending exact duplicates
         if new_note in existing_notes:
             return None
         return f"{existing_notes.rstrip()}\n[{date_str}] {new_note}"
@@ -151,14 +176,6 @@ def _append_note(existing_notes: str | None, new_note: str | None) -> str | None
 
 
 def extract_and_update_profile(client, supabase, name: str, messages: list):
-    """
-    Runs a structured extraction pass over recent messages.
-    Pulls out profile-worthy signals and writes them to user_profiles.
-
-    NOTES FIELD: always appended, never overwritten.
-    All other scalar fields: overwrite only if a non-null value is extracted.
-    All array fields (insecurities, soft_spots, boasts): merged, deduplicated.
-    """
     extraction_prompt = """
 You are a silent analyst reading a conversation between a user and Samantha.
 Extract structured intelligence about the USER ONLY.
@@ -209,7 +226,6 @@ Rules:
         if not raw:
             return {}
 
-        # Strip accidental markdown fences
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -219,14 +235,12 @@ Rules:
         extracted = json.loads(raw)
         updates = {}
 
-        # ── Scalar fields — overwrite if we have a non-null value ─
         scalar_fields = ["occupation", "location", "age", "relationship_status", "nicknames"]
         for field in scalar_fields:
             val = extracted.get(field)
             if val:
                 updates[field] = val
 
-        # ── notes — APPEND, never overwrite ───────────────────────
         new_note = extracted.get("notes")
         if new_note:
             try:
@@ -247,8 +261,6 @@ Rules:
             except Exception:
                 updates["notes"] = f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d')}] {new_note}"
 
-        # ── Array fields — merge and deduplicate ──────────────────
-        # Extended set: all dossier intelligence categories
         ARRAY_FIELDS = [
             "insecurities",
             "soft_spots",
@@ -292,10 +304,6 @@ Rules:
 
 
 def build_returning_user_context(profile: dict) -> str:
-    """
-    Returns an in-character instruction block for how Samantha
-    should open with a returning user.
-    """
     status        = profile.get("relationship_status", "stranger")
     name          = profile.get("name", "them")
     session_count = profile.get("session_count", 1)
@@ -331,7 +339,6 @@ def build_returning_user_context(profile: dict) -> str:
 
 
 def build_dossier_prompt(profile: dict, history: str) -> str:
-    """Render the full dossier block for prompt injection."""
     status        = profile.get("relationship_status", "stranger")
     session_count = profile.get("session_count", 1)
 
@@ -341,7 +348,6 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
         f"Sessions: {session_count}",
     ]
 
-    # ── Scalar fields ─────────────────────────────────────────────
     for field, label in [
         ("occupation", "Occupation"),
         ("location",   "Location"),
@@ -351,7 +357,6 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
         if profile.get(field):
             lines.append(f"{label}: {profile[field]}")
 
-    # ── Intelligence array fields — all rendered if populated ─────
     INTEL_FIELDS = [
         ("insecurities",   "Insecurities"),
         ("soft_spots",     "Soft spots"),
@@ -369,7 +374,6 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
         if items:
             lines.append(f"{label}: {', '.join(items)}")
 
-    # ── Notes — dated observation log ─────────────────────────────
     if profile.get("notes"):
         lines.append("Observations:")
         lines.append(profile["notes"])
