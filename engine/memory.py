@@ -18,7 +18,6 @@ HF_MODELS = [
     "HuggingFaceH4/zephyr-7b-beta",
 ]
 
-# HF client — initialised lazily so it doesn't crash if HF_TOKEN is absent
 _hf_client = None
 
 def _get_hf_client():
@@ -40,9 +39,6 @@ def _get_hf_client():
 
 
 def _call_with_fallback(client, messages, temperature=0.3):
-    """Try each Groq model, then fall through to HF models if all fail."""
-
-    # --- Groq tier ---
     for i, model in enumerate(SUMMARY_MODELS):
         try:
             response = client.chat.completions.create(
@@ -63,7 +59,6 @@ def _call_with_fallback(client, messages, temperature=0.3):
             else:
                 raise
 
-    # --- HF fallback tier ---
     hf = _get_hf_client()
     if hf:
         for model in HF_MODELS:
@@ -161,6 +156,10 @@ def save_session_log(supabase, name: str, session_id: str, summary: str):
 
 
 def _append_note(existing_notes: str | None, new_note: str | None) -> str | None:
+    """
+    Appends a new observation to the running notes string.
+    Skips if the new note is too similar to any existing line (fuzzy dedup).
+    """
     if not new_note:
         return None
 
@@ -168,57 +167,120 @@ def _append_note(existing_notes: str | None, new_note: str | None) -> str | None
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     if existing_notes:
-        if new_note in existing_notes:
-            return None
+        new_words = set(new_note.lower().split())
+        for line in existing_notes.split('\n'):
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+            line_words = set(line_clean.lower().split())
+            if line_words and len(new_words & line_words) / max(len(new_words), 1) > 0.6:
+                return None  # Too similar to an existing note — skip
+
         return f"{existing_notes.rstrip()}\n[{date_str}] {new_note}"
     else:
         return f"[{date_str}] {new_note}"
 
 
+# Status rank for relationship progression — never downgrade automatically
+STATUS_RANK = {
+    "stranger":   0,
+    "applicant":  1,
+    "accepted":   2,
+    "asset":      3,
+    "dismissed":  4,
+}
+
+
 def extract_and_update_profile(client, supabase, name: str, messages: list):
-    extraction_prompt = """
+    """
+    Extracts structured intelligence from the last N messages and updates
+    the user's profile in Supabase.
+
+    Core rules:
+    - Scalar fields (occupation, location, age, nicknames) are NEVER overwritten
+      once populated. First confident read wins. Prevents LLM drift.
+    - relationship_status only moves FORWARD in rank (stranger → applicant → etc).
+      It cannot be downgraded by extraction alone.
+    - nicknames: once assigned by Samantha, locked permanently.
+    - Array fields (insecurities, soft_spots, etc.) accumulate — new items
+      are merged in, never replaced.
+    - notes: appended with fuzzy dedup — similar observations are not re-logged.
+    """
+
+    # ── 1. Fetch current profile state BEFORE extraction ─────────────────
+    try:
+        current_res = supabase.table("user_profiles") \
+            .select("*") \
+            .eq("name", name) \
+            .limit(1) \
+            .execute()
+        current_profile = current_res.data[0] if current_res.data else {}
+    except Exception:
+        current_profile = {}
+
+    # Build a "what we already know" block to pass into the extraction prompt
+    known_scalars = {
+        k: current_profile.get(k)
+        for k in ["occupation", "location", "age", "nicknames", "relationship_status"]
+        if current_profile.get(k)
+    }
+    known_context = ""
+    if known_scalars:
+        known_context = (
+            f"\nALREADY ON FILE (do not re-extract or contradict unless "
+            f"the user explicitly corrects one of these this session):\n"
+            f"{json.dumps(known_scalars, indent=2)}\n"
+            f"Only return a field from the above list if the user has clearly "
+            f"stated something NEW that updates or contradicts it.\n"
+        )
+
+    # ── 2. Build extraction prompt ────────────────────────────────────────
+    extraction_prompt = f"""
 You are a silent analyst reading a conversation between a user and Samantha.
 Extract structured intelligence about the USER ONLY.
 
 Return ONLY valid JSON. No explanation. No markdown. No preamble.
-
+{known_context}
 Schema:
-{
+{{
   "occupation":          "string or null",
   "location":            "string or null — where they actually live, not just country",
   "age":                 "string or null",
   "relationship_status": "one of: stranger / applicant / accepted / asset / dismissed — or null if unchanged",
-  "nicknames":           "any label Samantha assigned this person, or null",
+  "nicknames":           "any label Samantha assigned this person this session, or null",
 
-  "insecurities":  ["things they hedge, apologise for, over-explain, or seem ashamed of"],
-  "soft_spots":    ["topics or names that visibly shifted their tone or energy"],
-  "boasts":        ["things they volunteered unprompted to impress or position themselves"],
-  "loyalties":     ["people or things they are clearly protective of"],
-  "fears":         ["things they seem afraid of losing, failing at, or being seen as"],
-  "secrets":       ["anything they let slip that felt unintentional or carefully guarded"],
-  "contradictions":["any gap between what they said now vs earlier, or said vs implied"],
-  "desires":       ["what they seem to want — stated or implied"],
-  "self_image":    ["how they see themselves, or how they want to be seen"],
+  "insecurities":   ["things they hedge, apologise for, over-explain, or seem ashamed of"],
+  "soft_spots":     ["topics or names that visibly shifted their tone or energy"],
+  "boasts":         ["things they volunteered unprompted to impress or position themselves"],
+  "loyalties":      ["people or things they are clearly protective of"],
+  "fears":          ["things they seem afraid of losing, failing at, or being seen as"],
+  "secrets":        ["anything they let slip that felt unintentional or carefully guarded"],
+  "contradictions": ["any gap between what they said now vs earlier, or said vs implied"],
+  "desires":        ["what they seem to want — stated or implied"],
+  "self_image":     ["how they see themselves, or how they want to be seen"],
 
   "notes": "1-2 sentence sharp NEW observation about who this person is — or null if nothing new"
-}
+}}
 
 Rules:
 - Only include fields where you have clear evidence from THIS conversation.
 - Use null or empty list [] for fields with no evidence.
-- relationship_status: only upgrade to 'accepted' or 'asset' if Samantha explicitly did so.
+- relationship_status: only upgrade to 'accepted' or 'asset' if Samantha explicitly did so in this conversation.
+  Never downgrade (e.g. do not change 'accepted' back to 'stranger').
+- nicknames: only extract if Samantha explicitly coined or used a new label for this person THIS session.
 - secrets: even small admissions count — things said casually that reveal more than intended.
 - contradictions: note the exact gap, e.g. 'said they have no regrets but described one in detail'.
 - notes: new and precise only. If nothing genuinely new was revealed, return null.
 - Keep all values short and sharp — this is a dossier, not a therapy report.
 """
 
+    # ── 3. Call the model ─────────────────────────────────────────────────
     try:
         raw = _call_with_fallback(
             client,
             messages=[
                 {"role": "system", "content": extraction_prompt},
-                {"role": "user", "content": str(messages[-20:])}
+                {"role": "user",   "content": str(messages[-20:])}
             ],
             temperature=0.1
         )
@@ -233,72 +295,81 @@ Rules:
         raw = raw.strip()
 
         extracted = json.loads(raw)
-        updates = {}
 
-        scalar_fields = ["occupation", "location", "age", "relationship_status", "nicknames"]
-        for field in scalar_fields:
-            val = extracted.get(field)
-            if val:
-                updates[field] = val
+    except (json.JSONDecodeError, Exception):
+        return {}
 
-        new_note = extracted.get("notes")
-        if new_note:
-            try:
-                current_res = supabase.table("user_profiles") \
-                    .select("notes") \
-                    .eq("name", name) \
-                    .limit(1) \
-                    .execute()
+    updates = {}
 
-                existing_notes = None
-                if current_res.data:
-                    existing_notes = current_res.data[0].get("notes")
+    # ── 4. Scalar fields — NEVER overwrite if already populated ──────────
+    SCALAR_FIELDS = ["occupation", "location", "age"]
+    for field in SCALAR_FIELDS:
+        val = extracted.get(field)
+        if val and not current_profile.get(field):
+            # Field is empty in DB — safe to write for the first time
+            updates[field] = val
+        # If already populated: ignore. First confident read wins.
 
-                appended = _append_note(existing_notes, new_note)
-                if appended is not None:
-                    updates["notes"] = appended
+    # ── 5. Nickname — locked once assigned ───────────────────────────────
+    new_nickname = extracted.get("nicknames")
+    if new_nickname and not current_profile.get("nicknames"):
+        updates["nicknames"] = new_nickname
+    # If a nickname already exists: never overwrite. It's hers. It stands.
 
-            except Exception:
-                updates["notes"] = f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d')}] {new_note}"
+    # ── 6. Relationship status — forward-only progression ────────────────
+    new_status = extracted.get("relationship_status")
+    existing_status = current_profile.get("relationship_status", "stranger")
+    if new_status and new_status in STATUS_RANK:
+        if STATUS_RANK.get(new_status, 0) > STATUS_RANK.get(existing_status, 0):
+            updates["relationship_status"] = new_status
+        # Never downgrade — if new rank is equal or lower, ignore.
 
-        ARRAY_FIELDS = [
-            "insecurities",
-            "soft_spots",
-            "boasts",
-            "loyalties",
-            "fears",
-            "secrets",
-            "contradictions",
-            "desires",
-            "self_image",
-        ]
+    # ── 7. Notes — append with fuzzy dedup ───────────────────────────────
+    new_note = extracted.get("notes")
+    if new_note:
+        existing_notes = current_profile.get("notes")
+        appended = _append_note(existing_notes, new_note)
+        if appended is not None:
+            updates["notes"] = appended
 
-        try:
-            arr_res = supabase.table("user_profiles") \
-                .select(", ".join(ARRAY_FIELDS)) \
-                .eq("name", name) \
-                .limit(1) \
-                .execute()
+    # ── 8. Array fields — merge in new items, never replace ──────────────
+    ARRAY_FIELDS = [
+        "insecurities",
+        "soft_spots",
+        "boasts",
+        "loyalties",
+        "fears",
+        "secrets",
+        "contradictions",
+        "desires",
+        "self_image",
+    ]
 
-            if arr_res.data:
-                existing = arr_res.data[0]
-                for arr_field in ARRAY_FIELDS:
-                    new_items = extracted.get(arr_field, [])
-                    if new_items:
-                        existing_items = existing.get(arr_field) or []
-                        merged = list(dict.fromkeys(existing_items + new_items))
-                        updates[arr_field] = merged
-        except Exception:
-            pass
+    for arr_field in ARRAY_FIELDS:
+        new_items = extracted.get(arr_field, [])
+        if new_items:
+            existing_items = current_profile.get(arr_field) or []
 
-        if updates:
-            update_profile(supabase, name, updates)
-            return updates
+            # Fuzzy dedup for array items too
+            merged = list(existing_items)
+            for new_item in new_items:
+                new_words = set(new_item.lower().split())
+                is_duplicate = False
+                for existing_item in existing_items:
+                    existing_words = set(existing_item.lower().split())
+                    if existing_words and len(new_words & existing_words) / max(len(new_words), 1) > 0.6:
+                        is_duplicate = True
+                        break
+                if not is_duplicate:
+                    merged.append(new_item)
 
-    except json.JSONDecodeError:
-        pass
-    except Exception:
-        pass
+            if merged != existing_items:
+                updates[arr_field] = merged
+
+    # ── 9. Write to Supabase ──────────────────────────────────────────────
+    if updates:
+        update_profile(supabase, name, updates)
+        return updates
 
     return {}
 
