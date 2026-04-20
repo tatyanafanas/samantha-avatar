@@ -6,6 +6,7 @@ import uuid
 import random
 import json
 import base64
+import re
 
 # --- IMPORT MODULAR COMPONENTS ---
 from persona.config import STYLES
@@ -15,6 +16,7 @@ from engine.memory import (
     get_or_create_profile,
     get_conversation_history,
     save_session_log,
+    save_full_transcript,
     extract_and_update_profile,
     synthesise_deep_profile,
     build_dossier_prompt,
@@ -47,7 +49,10 @@ except Exception:
     st.warning("Style file not found. Using default styling.")
 
 
-# --- CONNECTIONS ---
+# ================================================================
+# CONNECTIONS
+# ================================================================
+
 @st.cache_resource
 def init_connections():
     try:
@@ -82,12 +87,8 @@ hf_client        = init_hf_client()
 
 # ================================================================
 # MODEL LISTS
-# Every free-tier model available across Groq and HuggingFace.
-# The more models here the less likely a rate-limit kills a session.
 # ================================================================
 
-# Groq — text only, free tier
-# Ordered roughly best→fastest. All are free.
 GROQ_TEXT_MODELS = [
     "llama-3.3-70b-versatile",
     "llama-3.1-70b-versatile",
@@ -96,18 +97,18 @@ GROQ_TEXT_MODELS = [
     "qwen/qwen3-32b",
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
-    "deepseek-r1-distill-llama-70b",
-    "deepseek-r1-distill-qwen-32b",
     "gemma2-9b-it",
     "llama-3.1-8b-instant",
     "llama3-8b-8192",
     "gemma-7b-it",
     "llama-3.2-3b-preview",
     "llama-3.2-1b-preview",
+    # Deepseek distill models work well but emit <think> blocks —
+    # these are stripped automatically by clean_reply() below.
+    "deepseek-r1-distill-llama-70b",
+    "deepseek-r1-distill-qwen-32b",
 ]
 
-# Groq — vision capable, free tier
-# Tried first when an image is attached; text models follow as fallback.
 GROQ_VISION_MODELS = [
     "meta-llama/llama-4-scout-17b-16e-instruct",
     "meta-llama/llama-4-maverick-17b-128e-instruct",
@@ -115,8 +116,6 @@ GROQ_VISION_MODELS = [
     "llama-3.2-11b-vision-preview",
 ]
 
-# HuggingFace Router — text, free tier
-# Only tried after every Groq model has failed or rate-limited.
 HF_TEXT_MODELS = [
     "NousResearch/Hermes-2-Pro-Llama-3-8B:novita",
     "openchat/openchat-3.5-0106",
@@ -135,7 +134,6 @@ HF_TEXT_MODELS = [
     "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
 ]
 
-# HuggingFace — vision capable, free tier
 HF_VISION_MODELS = [
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-1.5-13b-hf",
@@ -147,41 +145,33 @@ HF_VISION_MODELS = [
 # SESSION SETUP
 # ================================================================
 
-if "session_id"                not in st.session_state:
+if "session_id"               not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
-
-if "profile"                   not in st.session_state:
+if "profile"                  not in st.session_state:
     st.session_state.profile = {
-        "submission":          0.2,
-        "irritation":          0.1,
-        "mood":                "Coronated",
-        "goal":                "learn_them",
+        "submission": 0.2, "irritation": 0.1,
+        "mood": "Coronated", "goal": "learn_them",
         "_professional_count": 0,
     }
-
-if "messages"                  not in st.session_state:
+if "messages"                 not in st.session_state:
     st.session_state.messages = []
-
-if "last_style"                not in st.session_state:
+if "last_style"               not in st.session_state:
     st.session_state.last_style = None
-
-if "user_name"                 not in st.session_state:
+if "user_name"                not in st.session_state:
     st.session_state.user_name = None
-
-if "user_profile_db"           not in st.session_state:
+if "user_profile_db"          not in st.session_state:
     st.session_state.user_profile_db = {}
-
-if "user_history_db"           not in st.session_state:
+if "user_history_db"          not in st.session_state:
     st.session_state.user_history_db = "No prior sessions."
-
-if "opener_injected"           not in st.session_state:
+if "opener_injected"          not in st.session_state:
     st.session_state.opener_injected = False
-
-if "last_extraction_category"  not in st.session_state:
+if "last_extraction_category" not in st.session_state:
     st.session_state.last_extraction_category = None
-
-if "last_deep_synthesis_at"    not in st.session_state:
+if "last_deep_synthesis_at"   not in st.session_state:
     st.session_state.last_deep_synthesis_at = 0
+# Pending background tasks — processed at end of turn to save API calls
+if "pending_memory_update"    not in st.session_state:
+    st.session_state.pending_memory_update = False
 
 
 # ================================================================
@@ -202,40 +192,55 @@ if not st.session_state.user_name:
 
 
 # ================================================================
+# REPLY CLEANER
+# Strips <think>...</think> blocks that reasoning models emit.
+# Also trims any other common model artefacts.
+# ================================================================
+
+def clean_reply(text: str) -> str:
+    """
+    Remove chain-of-thought blocks and other model artefacts
+    before showing the reply to the user.
+
+    Handles:
+    - <think>...</think>  (DeepSeek R1, some Qwen models)
+    - <thinking>...</thinking>
+    - Leading/trailing whitespace after stripping
+    """
+    # Strip XML-style think blocks (greedy=False so nested tags don't swallow content)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Strip any leftover empty lines at the top
+    text = text.strip()
+    return text
+
+
+# ================================================================
 # IMAGE HELPERS
 # ================================================================
 
 def encode_image(uploaded_file) -> tuple[str, str]:
-    """Return (base64_string, mime_type) for an uploaded image file."""
     uploaded_file.seek(0)
     b64  = base64.b64encode(uploaded_file.read()).decode("utf-8")
-    mime = uploaded_file.type  # e.g. "image/jpeg"
+    mime = uploaded_file.type
     return b64, mime
 
 
 def build_user_message(text: str, uploaded_file=None) -> dict:
     """
-    Build the message dict for the model API call.
-    Returns a multimodal content block when an image is present,
-    plain text otherwise.
+    Build the API message dict.
+    Multimodal when image present; plain text otherwise.
     Images are NOT stored in session history — only text is kept
-    to avoid bloating the context window on every subsequent turn.
+    to prevent base64 blobs inflating the context on every turn.
     """
     if uploaded_file is None:
         return {"role": "user", "content": text or "."}
-
     b64, mime = encode_image(uploaded_file)
     return {
         "role": "user",
         "content": [
-            {
-                "type":      "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"}
-            },
-            {
-                "type": "text",
-                "text": text if text else "."
-            }
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+            {"type": "text",      "text": text if text else "."}
         ]
     }
 
@@ -250,16 +255,6 @@ def _dedupe(lst: list) -> list:
 
 
 def call_with_fallback(client, system_prompt, clean_messages, has_image: bool = False):
-    """
-    Cycle through every available model until one responds.
-
-    Order when image present:  vision models → text models → HF vision → HF text
-    Order when text only:      Groq text models → HF text models
-
-    Rate-limited models get a short exponential backoff before moving on.
-    Unavailable/deprecated models are skipped immediately.
-    Unknown errors are logged and skipped rather than crashing the session.
-    """
     if has_image:
         groq_order = _dedupe(GROQ_VISION_MODELS + GROQ_TEXT_MODELS)
         hf_order   = _dedupe(HF_VISION_MODELS   + HF_TEXT_MODELS)
@@ -269,21 +264,16 @@ def call_with_fallback(client, system_prompt, clean_messages, has_image: bool = 
 
     payload = [{"role": "system", "content": system_prompt}] + clean_messages
 
-    # ── Groq tier ────────────────────────────────────────────────
     for i, model in enumerate(groq_order):
         try:
             response = client.chat.completions.create(
-                model=model,
-                messages=payload,
-                temperature=0.85
+                model=model, messages=payload, temperature=0.85
             )
-            return response.choices[0].message.content, model
-
+            raw = response.choices[0].message.content
+            return clean_reply(raw), model
         except Exception as e:
             err = str(e).lower()
             if any(x in err for x in ["rate limit", "429", "quota", "exceeded"]):
-                # Backoff capped at 30s; exponent resets every 6 models
-                # so we don't wait forever cycling through 15 models
                 time.sleep(min(2 ** (i % 6), 30))
                 continue
             elif any(x in err for x in ["not found", "unavailable", "deprecated", "invalid model"]):
@@ -292,17 +282,14 @@ def call_with_fallback(client, system_prompt, clean_messages, has_image: bool = 
                 print(f"[Groq error] {model}: {e}")
                 continue
 
-    # ── HuggingFace tier ─────────────────────────────────────────
     if hf_client:
         for model in hf_order:
             try:
                 response = hf_client.chat.completions.create(
-                    model=model,
-                    messages=payload,
-                    temperature=0.85
+                    model=model, messages=payload, temperature=0.85
                 )
-                return response.choices[0].message.content, f"hf/{model}"
-
+                raw = response.choices[0].message.content
+                return clean_reply(raw), f"hf/{model}"
             except Exception as e:
                 print(f"[HF fallback failed] {model}: {e}")
                 continue
@@ -337,13 +324,14 @@ Write ONE short opening line in Samantha's voice.
 - Cold familiarity. Not warmth.
 - No "welcome back". Nothing hospitable.
 - Do not announce that you remember them.
-- Let the verdict colour the tone — don't state it.
+- Let the verdict colour the tone — do not state it.
 - If there is an unresolved thread from before, you may open on it obliquely.
 - If status is 'dismissed', let the temperature carry it silently.
 - One sentence. No explanation.
+- Output ONLY the line itself. No preamble, no labels, no reasoning.
 """
     try:
-        reply = mem_fallback(
+        raw   = mem_fallback(
             client,
             messages=[
                 {"role": "system", "content": opener_instruction},
@@ -351,7 +339,7 @@ Write ONE short opening line in Samantha's voice.
             ],
             temperature=0.9
         )
-        return reply.strip() if reply else None
+        return clean_reply(raw).strip() if raw else None
     except Exception:
         return None
 
@@ -361,13 +349,11 @@ Write ONE short opening line in Samantha's voice.
 # ================================================================
 
 def _run_deep_synthesis():
-    """Run the deep profile synthesis and reload the profile from DB."""
     if not client or not st.session_state.messages:
         return
     try:
         updated_deep = synthesise_deep_profile(
-            client,
-            supabase,
+            client, supabase,
             st.session_state.user_name,
             st.session_state.messages,
             st.session_state.user_profile_db,
@@ -382,6 +368,146 @@ def _run_deep_synthesis():
 
 
 # ================================================================
+# BACKGROUND MEMORY UPDATE
+# Batched into a single deferred call at end of turn
+# to reduce the number of API calls per message.
+# ================================================================
+
+def _run_memory_update():
+    """
+    Runs summary + extraction in one deferred block.
+    Called only every 6 messages (not 3) to halve API usage.
+    Summary and extraction share the same model call where possible.
+    """
+    try:
+        # Single combined call: summary + extraction hint in one prompt
+        combined_prompt = """
+You are a silent analyst. Given this conversation, produce TWO things:
+
+1. SUMMARY (5-6 plain sentences about the USER ONLY):
+Who they revealed themselves to be, what they protect, what they exposed,
+how they responded to pressure, the power dynamic observed.
+Plain prose. No dialogue reproduction. No roleplay tags.
+
+2. EXTRACTION (valid JSON on a new line after the summary, starting with {):
+Extract structured intelligence about the user.
+Schema: { "occupation": null, "location": null, "age": null,
+"insecurities": [], "soft_spots": [], "boasts": [],
+"loyalties": [], "fears": [], "secrets": [],
+"contradictions": [], "desires": [], "self_image": [],
+"notes": null }
+Only include fields with clear evidence. Use null or [] for the rest.
+"""
+        raw = mem_fallback(
+            client,
+            messages=[
+                {"role": "system", "content": combined_prompt},
+                {"role": "user",   "content": str(st.session_state.messages[-12:])}
+            ],
+            temperature=0.2
+        )
+
+        if not raw:
+            return
+
+        # Split summary from JSON
+        # JSON block starts at the first { after the summary paragraph
+        json_start = raw.find("\n{")
+        if json_start == -1:
+            json_start = raw.find("{")
+
+        summary_text  = raw[:json_start].strip() if json_start > 0 else raw.strip()
+        json_text     = raw[json_start:].strip() if json_start > 0 else None
+
+        # Save session summary
+        if summary_text:
+            save_session_log(
+                supabase,
+                st.session_state.user_name,
+                st.session_state.session_id,
+                summary_text
+            )
+
+        # Save full transcript snapshot (every 6 messages)
+        save_full_transcript(
+            supabase,
+            st.session_state.user_name,
+            st.session_state.session_id,
+            st.session_state.messages
+        )
+
+        # Apply extraction if we got valid JSON
+        if json_text:
+            try:
+                extracted = json.loads(json_text)
+                _apply_extraction(extracted)
+            except json.JSONDecodeError:
+                pass
+
+    except Exception as e:
+        print(f"[memory update error] {e}")
+
+    # Reload profile after writes
+    try:
+        st.session_state.user_profile_db = get_or_create_profile(
+            supabase, st.session_state.user_name
+        )
+        st.session_state.user_history_db = get_conversation_history(
+            supabase, st.session_state.user_name
+        )
+    except Exception:
+        pass
+
+
+def _apply_extraction(extracted: dict):
+    """Apply extracted fields to the user profile in Supabase."""
+    try:
+        current_res = supabase.table("user_profiles") \
+            .select("*").eq("name", st.session_state.user_name).limit(1).execute()
+        current = current_res.data[0] if current_res.data else {}
+    except Exception:
+        current = {}
+
+    updates = {}
+
+    for field in ["occupation", "location", "age"]:
+        val = extracted.get(field)
+        if val and not current.get(field):
+            updates[field] = val
+
+    ARRAY_FIELDS = [
+        "insecurities", "soft_spots", "boasts", "loyalties",
+        "fears", "secrets", "contradictions", "desires", "self_image",
+    ]
+    for arr_field in ARRAY_FIELDS:
+        new_items = extracted.get(arr_field, [])
+        if new_items:
+            existing = current.get(arr_field) or []
+            merged   = list(existing)
+            for item in new_items:
+                new_words    = set(item.lower().split())
+                is_duplicate = any(
+                    len(new_words & set(e.lower().split())) / max(len(new_words), 1) > 0.6
+                    for e in existing
+                )
+                if not is_duplicate:
+                    merged.append(item)
+            if merged != existing:
+                updates[arr_field] = merged
+
+    new_note = extracted.get("notes")
+    if new_note:
+        from engine.memory import _append_note
+        appended = _append_note(current.get("notes"), new_note)
+        if appended:
+            updates["notes"] = appended
+
+    if updates:
+        from engine.memory import update_profile
+        update_profile(supabase, st.session_state.user_name, updates)
+
+
+# ================================================================
 # MAIN LAYOUT
 # ================================================================
 
@@ -392,7 +518,7 @@ with col1:
     st.write("_Raised in the halls of 5-star excellence._")
     st.markdown("---")
 
-    # Returning user opener — injected once at session start
+    # Returning user opener — once per session
     if not st.session_state.opener_injected and client:
         profile_db = st.session_state.user_profile_db
         if (profile_db.get("session_count") or 1) > 1:
@@ -402,12 +528,11 @@ with col1:
                 st.session_state.messages.append({"role": "assistant", "content": opener})
         st.session_state.opener_injected = True
 
-    # Render conversation history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # ── Image uploader ────────────────────────────────────────────
+    # Image uploader
     uploaded_image = st.file_uploader(
         "Attach an image — if you think it's worth her time.",
         type=["jpg", "jpeg", "png", "webp"],
@@ -415,7 +540,6 @@ with col1:
         key="image_upload"
     )
 
-    # ── Chat input ────────────────────────────────────────────────
     if prompt := st.chat_input("Speak. I'm allergic to stagnation."):
 
         if not client:
@@ -425,13 +549,10 @@ with col1:
         has_image   = uploaded_image is not None
         display_txt = prompt if prompt else "[image submitted]"
 
-        # Update live dynamics
         st.session_state.profile = analyze_interaction(st.session_state.profile, display_txt)
         st.session_state.profile = update_goal(st.session_state.profile)
 
-        # Store text-only version in session history
-        # (base64 images must NOT live in the rolling history —
-        #  they would inflate the context window on every subsequent turn)
+        # Text-only stored in history — no base64 blobs
         st.session_state.messages.append({"role": "user", "content": display_txt})
 
         with st.chat_message("user"):
@@ -439,19 +560,16 @@ with col1:
             if has_image:
                 st.image(uploaded_image, width=280)
 
-        # Build dossier for this turn
         dossier = build_dossier_prompt(
             st.session_state.user_profile_db,
             st.session_state.user_history_db
         )
 
-        # Pick style
         available     = [s for s in list(STYLES.keys()) if s != st.session_state.last_style]
         current_style = random.choice(available)
         st.session_state.last_style = current_style
         style_data    = STYLES[current_style]
 
-        # Build system prompt
         system_prompt = (
             build_system_prompt(
                 TRAITS,
@@ -471,18 +589,15 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
 """
         )
 
-        # Append vision instruction when image is present
         if has_image:
             system_prompt += """
 ---
 IMAGE NOTE:
 The person has sent you an image. You can see it.
-React as Samantha would — observe, assess, comment if it reveals something.
-Do not describe it mechanically. If it is unremarkable, treat it as unremarkable.
-If it tells you something about who they are, use that.
+React as Samantha would — observe, assess, comment if it reveals something about them.
+Do not describe it mechanically. If unremarkable, treat it as unremarkable.
 """
 
-        # Track extraction category
         from engine.prompt_builder import _pick_extraction_move
         cat, _ = _pick_extraction_move(
             len(st.session_state.messages),
@@ -490,8 +605,7 @@ If it tells you something about who they are, use that.
         )
         st.session_state.last_extraction_category = cat
 
-        # Build clean message list for API call
-        # All prior messages are text-only; last message carries the image if present
+        # Prior messages text-only; last message carries image if present
         clean_messages = [
             m for m in st.session_state.messages[:-1]
             if m["role"] in ("user", "assistant") and m["content"].strip()
@@ -506,7 +620,6 @@ If it tells you something about who they are, use that.
                     client, system_prompt, clean_messages, has_image=has_image
                 )
 
-            # Show fallback label when not on primary model
             primary = GROQ_VISION_MODELS[0] if has_image else GROQ_TEXT_MODELS[0]
             if model_used != primary:
                 st.caption(f"_(fallback: {model_used})_")
@@ -517,54 +630,15 @@ If it tells you something about who they are, use that.
 
             msg_count = len(st.session_state.messages)
 
-            # ── Every 3 messages: extraction + session summary ───────────
-            if msg_count % 3 == 0:
-                try:
-                    summary = mem_fallback(
-                        client,
-                        messages=[
-                            {"role": "system", "content": (
-                                "Summarize this conversation in 5-6 plain sentences about the USER ONLY. "
-                                "Do NOT reproduce dialogue. Do NOT use roleplay tags. "
-                                "Focus on: who they revealed themselves to be, what they protect, "
-                                "what they exposed, how they responded to pressure, "
-                                "and the power dynamic observed. Plain prose only."
-                            )},
-                            {"role": "user", "content": str(st.session_state.messages[-10:])}
-                        ],
-                        temperature=0.3
-                    )
-                    if summary:
-                        save_session_log(
-                            supabase,
-                            st.session_state.user_name,
-                            st.session_state.session_id,
-                            summary
-                        )
-                except Exception:
-                    pass
+            # ── Every 6 messages: combined memory update (was every 3) ──
+            # One combined API call instead of two separate ones —
+            # halves the background API usage.
+            if msg_count % 6 == 0:
+                _run_memory_update()
 
-                try:
-                    extract_and_update_profile(
-                        client, supabase,
-                        st.session_state.user_name,
-                        st.session_state.messages
-                    )
-                except Exception:
-                    pass
-
-                try:
-                    st.session_state.user_profile_db = get_or_create_profile(
-                        supabase, st.session_state.user_name
-                    )
-                    st.session_state.user_history_db = get_conversation_history(
-                        supabase, st.session_state.user_name
-                    )
-                except Exception:
-                    pass
-
-            # ── Every 15 messages: deep profile synthesis ────────────────
-            if (msg_count - st.session_state.last_deep_synthesis_at) >= 15:
+            # ── Every 18 messages: deep profile synthesis ────────────────
+            # (was every 15 — slightly more space between heavy calls)
+            if (msg_count - st.session_state.last_deep_synthesis_at) >= 18:
                 _run_deep_synthesis()
 
         except Exception as e:
@@ -583,7 +657,6 @@ with col2:
 
     st.write("**Subject Submission**")
     st.progress(st.session_state.profile["submission"])
-
     st.write("**Her Irritation**")
     st.progress(st.session_state.profile["irritation"])
 
@@ -625,16 +698,20 @@ with col2:
     st.caption("- She wants to know you, not your job.")
 
     if st.button("Reset Interaction"):
-        # Synthesise before wiping — no session data lost on manual reset
         if st.session_state.messages and client:
+            # Save full transcript and run deep synthesis before clearing
+            save_full_transcript(
+                supabase,
+                st.session_state.user_name,
+                st.session_state.session_id,
+                st.session_state.messages
+            )
             _run_deep_synthesis()
 
         st.session_state.messages               = []
         st.session_state.profile                = {
-            "submission":          0.2,
-            "irritation":          0.1,
-            "mood":                "Observing",
-            "goal":                "learn_them",
+            "submission": 0.2, "irritation": 0.1,
+            "mood": "Observing", "goal": "learn_them",
             "_professional_count": 0,
         }
         st.session_state.session_id             = str(uuid.uuid4())
