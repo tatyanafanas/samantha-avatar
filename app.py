@@ -15,6 +15,7 @@ from engine.memory import (
     get_conversation_history,
     save_session_log,
     extract_and_update_profile,
+    synthesise_deep_profile,
     build_dossier_prompt,
     _call_with_fallback as mem_fallback,
 )
@@ -97,10 +98,10 @@ if "session_id" not in st.session_state:
 
 if "profile" not in st.session_state:
     st.session_state.profile = {
-        "submission": 0.2,
-        "irritation": 0.1,
-        "mood":       "Coronated",
-        "goal":       "learn_them",
+        "submission":          0.2,
+        "irritation":          0.1,
+        "mood":                "Coronated",
+        "goal":                "learn_them",
         "_professional_count": 0,
     }
 
@@ -125,6 +126,11 @@ if "opener_injected" not in st.session_state:
 if "last_extraction_category" not in st.session_state:
     st.session_state.last_extraction_category = None
 
+# Track how many messages have been processed since last deep synthesis
+if "last_deep_synthesis_at" not in st.session_state:
+    st.session_state.last_deep_synthesis_at = 0
+
+
 # --- NAME GATE ---
 if not st.session_state.user_name:
     name_input = st.text_input(
@@ -133,8 +139,8 @@ if not st.session_state.user_name:
     )
     if name_input:
         st.session_state.user_name = name_input.strip().title()
-        st.session_state.user_profile_db = get_or_create_profile(supabase, st.session_state.user_name)
-        st.session_state.user_history_db = get_conversation_history(supabase, st.session_state.user_name)
+        st.session_state.user_profile_db  = get_or_create_profile(supabase, st.session_state.user_name)
+        st.session_state.user_history_db  = get_conversation_history(supabase, st.session_state.user_name)
         st.rerun()
     st.stop()
 
@@ -143,7 +149,6 @@ if not st.session_state.user_name:
 def call_with_fallback(client, system_prompt, clean_messages):
     payload = [{"role": "system", "content": system_prompt}] + clean_messages
 
-    # Groq models first
     for i, model in enumerate(MODELS):
         try:
             response = client.chat.completions.create(
@@ -153,8 +158,8 @@ def call_with_fallback(client, system_prompt, clean_messages):
             )
             return response.choices[0].message.content, model
         except Exception as e:
-            error_str = str(e).lower()
-            is_rate_limit = any(x in error_str for x in ["rate limit", "429", "quota", "exceeded"])
+            error_str    = str(e).lower()
+            is_rate_limit  = any(x in error_str for x in ["rate limit", "429", "quota", "exceeded"])
             is_unavailable = any(x in error_str for x in ["model", "not found", "unavailable", "deprecated"])
             if is_rate_limit:
                 time.sleep(min(2 ** i, 16))
@@ -164,7 +169,6 @@ def call_with_fallback(client, system_prompt, clean_messages):
             else:
                 raise
 
-    # HF fallback tier
     if hf_client:
         for model in HF_MODELS:
             try:
@@ -191,19 +195,22 @@ def generate_opener(client, profile, dossier):
     status    = profile.get("relationship_status", "stranger")
     nicknames = profile.get("nicknames", "")
     notes     = profile.get("notes", "")
+    deep      = profile.get("deep_profile") or {}
+    her_read  = deep.get("her_read", "")
 
     opener_instruction = f"""
 {dossier}
 
 {name} has just arrived. This is session #{session_count}. Status: {status}.
 {"You have privately called them: " + nicknames + "." if nicknames else ""}
-{"Your prior read: " + notes if notes else ""}
+{"Your private verdict on them: " + her_read if her_read else ("Your prior read: " + notes if notes else "")}
 
 Write ONE short opening line in Samantha's voice.
 - Cold familiarity. Not warmth.
 - No "welcome back". Nothing hospitable.
 - Do not announce that you remember them.
-- Reference something personal from their history only if it lands with precision.
+- If you have a private verdict on them, let it colour the tone — don't state it.
+- If there is an unresolved thread from a prior session, you may open on it — obliquely.
 - If their status is 'dismissed', let the tone carry that weight silently.
 - One sentence. No explanation.
 """
@@ -212,13 +219,41 @@ Write ONE short opening line in Samantha's voice.
             client,
             messages=[
                 {"role": "system", "content": opener_instruction},
-                {"role": "user", "content": "Generate the opening line now."}
+                {"role": "user",   "content": "Generate the opening line now."}
             ],
             temperature=0.9
         )
         return reply.strip() if reply else None
     except Exception:
         return None
+
+
+# --- DEEP SYNTHESIS HELPER ---
+def _run_deep_synthesis():
+    """
+    Runs the deep profile synthesis and reloads the profile from DB.
+    Called every 15 new messages and on manual reset.
+    """
+    if not client or not st.session_state.messages:
+        return
+    try:
+        updated_deep = synthesise_deep_profile(
+            client,
+            supabase,
+            st.session_state.user_name,
+            st.session_state.messages,
+            st.session_state.user_profile_db,
+        )
+        # Merge the updated deep profile into the local state immediately
+        # so the dossier reflects it on the next turn
+        st.session_state.user_profile_db["deep_profile"] = updated_deep
+        # Also reload from DB for consistency
+        st.session_state.user_profile_db = get_or_create_profile(
+            supabase, st.session_state.user_name
+        )
+        st.session_state.last_deep_synthesis_at = len(st.session_state.messages)
+    except Exception as e:
+        print(f"[deep synthesis error] {e}")
 
 
 # --- MAIN LAYOUT ---
@@ -309,8 +344,10 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
             with st.chat_message("assistant"):
                 st.markdown(reply)
 
-            # Periodic memory update — every 3 messages
-            if len(st.session_state.messages) % 3 == 0:
+            msg_count = len(st.session_state.messages)
+
+            # ── Every 3 messages: lightweight extraction + session summary ──
+            if msg_count % 3 == 0:
                 try:
                     summary_prompt = """
 Summarize this conversation in 5-6 plain sentences about the USER ONLY.
@@ -323,7 +360,7 @@ Output plain prose only.
                         client,
                         messages=[
                             {"role": "system", "content": summary_prompt},
-                            {"role": "user", "content": str(st.session_state.messages[-10:])}
+                            {"role": "user",   "content": str(st.session_state.messages[-10:])}
                         ],
                         temperature=0.3
                     )
@@ -349,15 +386,20 @@ Output plain prose only.
 
                 try:
                     st.session_state.user_profile_db = get_or_create_profile(
-                        supabase,
-                        st.session_state.user_name
+                        supabase, st.session_state.user_name
                     )
                     st.session_state.user_history_db = get_conversation_history(
-                        supabase,
-                        st.session_state.user_name
+                        supabase, st.session_state.user_name
                     )
                 except Exception:
                     pass
+
+            # ── Every 15 messages: deep profile synthesis ────────────────
+            messages_since_last_synthesis = (
+                msg_count - st.session_state.last_deep_synthesis_at
+            )
+            if messages_since_last_synthesis >= 15:
+                _run_deep_synthesis()
 
         except Exception as e:
             st.error(f"Connection lost: {e}")
@@ -397,20 +439,36 @@ with col2:
             if isinstance(spots, list):
                 st.caption(f"Soft spots: {', '.join(spots)}")
 
+        # Show deep profile status in sidebar
+        deep = db.get("deep_profile") or {}
+        if deep.get("her_read"):
+            st.markdown("---")
+            st.markdown("**Private File**")
+            st.caption("✦ Verdict on file")
+        if deep.get("open_questions"):
+            st.caption(f"✦ {len(deep['open_questions'])} open threads")
+        if deep.get("recurring_patterns"):
+            st.caption(f"✦ {len(deep['recurring_patterns'])} patterns logged")
+
     st.markdown("---")
     st.write("**Protocol:**")
     st.caption("- Address her as 'Miss Samantha' or 'Boss'.")
     st.caption("- She wants to know you, not your job.")
 
     if st.button("Reset Interaction"):
-        st.session_state.messages = []
-        st.session_state.profile  = {
-            "submission": 0.2,
-            "irritation": 0.1,
-            "mood":       "Observing",
-            "goal":       "learn_them",
+        # Run deep synthesis before wiping the session
+        if st.session_state.messages and client:
+            _run_deep_synthesis()
+
+        st.session_state.messages               = []
+        st.session_state.profile                = {
+            "submission":          0.2,
+            "irritation":          0.1,
+            "mood":                "Observing",
+            "goal":                "learn_them",
             "_professional_count": 0,
         }
-        st.session_state.session_id      = str(uuid.uuid4())
-        st.session_state.opener_injected = False
+        st.session_state.session_id             = str(uuid.uuid4())
+        st.session_state.opener_injected        = False
+        st.session_state.last_deep_synthesis_at = 0
         st.rerun()
