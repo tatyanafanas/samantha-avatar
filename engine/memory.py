@@ -3,30 +3,62 @@ import time
 from datetime import datetime, timezone
 
 
+# ================================================================
+# MODEL LISTS
+# Mirrored from app.py so memory/summary calls have the same
+# wide fallback pool as the main conversation router.
+# ================================================================
+
 SUMMARY_MODELS = [
+    # Groq — text, free tier
     "llama-3.3-70b-versatile",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
-    "openai/gpt-oss-20b",
-    "openai/gpt-oss-120b",
+    "llama-3.1-70b-versatile",
+    "llama3-70b-8192",
+    "mixtral-8x7b-32768",
     "qwen/qwen3-32b",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "deepseek-r1-distill-llama-70b",
+    "deepseek-r1-distill-qwen-32b",
+    "gemma2-9b-it",
     "llama-3.1-8b-instant",
+    "llama3-8b-8192",
+    "gemma-7b-it",
+    "llama-3.2-3b-preview",
+    "llama-3.2-1b-preview",
+    # Groq — vision models can handle text too
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
 ]
 
 HF_MODELS = [
     "NousResearch/Hermes-2-Pro-Llama-3-8B:novita",
+    "openchat/openchat-3.5-0106",
     "mistralai/Mistral-7B-Instruct-v0.3",
+    "mistralai/Mistral-7B-Instruct-v0.1",
     "HuggingFaceH4/zephyr-7b-beta",
+    "HuggingFaceH4/zephyr-7b-alpha",
+    "microsoft/Phi-3-mini-4k-instruct",
+    "microsoft/Phi-3-mini-128k-instruct",
+    "Qwen/Qwen2-7B-Instruct",
+    "Qwen/Qwen2.5-7B-Instruct",
+    "google/gemma-7b-it",
+    "google/gemma-2-9b-it",
+    "meta-llama/Llama-3.2-3B-Instruct",
+    "meta-llama/Llama-3.2-1B-Instruct",
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
 ]
 
-# Reference schema — not stored in Supabase, used as a template for synthesis
+# Reference schema — lives in Python only, not in Supabase.
+# Documents the shape of the deep_profile JSONB column.
 DEEP_PROFILE_SCHEMA = {
-    "who_they_are":        "",   # 3-5 sentence synthesis of their character
-    "recurring_patterns":  [],   # behaviours/themes that appear across sessions
-    "unresolved_threads":  [],   # things they keep circling back to without resolution
-    "evolution":           [],   # how they have changed or shifted session-to-session
-    "things_she_knows":    [],   # specific facts or admissions she holds
-    "open_questions":      [],   # what remains genuinely unknown — drives future sessions
-    "her_read":            "",   # Samantha's private one-paragraph verdict on who they are
+    "who_they_are":       "",   # 3-5 sentence character synthesis
+    "recurring_patterns": [],   # behaviours/themes across multiple sessions
+    "unresolved_threads": [],   # things they keep circling without resolution
+    "evolution":          [],   # how they have changed session-to-session
+    "things_she_knows":   [],   # specific facts/admissions she holds
+    "open_questions":     [],   # what remains unknown — drives future sessions
+    "her_read":           "",   # Samantha's private verdict on who they are
 }
 
 _hf_client = None
@@ -51,6 +83,10 @@ def _get_hf_client():
 
 
 def _call_with_fallback(client, messages, temperature=0.3):
+    """
+    Cycle through SUMMARY_MODELS then HF_MODELS until one responds.
+    Used for all memory/summary/extraction/synthesis calls.
+    """
     for i, model in enumerate(SUMMARY_MODELS):
         try:
             response = client.chat.completions.create(
@@ -60,16 +96,15 @@ def _call_with_fallback(client, messages, temperature=0.3):
             )
             return response.choices[0].message.content
         except Exception as e:
-            error_str = str(e).lower()
-            is_rate_limit  = any(x in error_str for x in ["rate limit", "429", "quota", "exceeded"])
-            is_unavailable = any(x in error_str for x in ["model", "not found", "unavailable", "deprecated"])
-            if is_rate_limit:
-                time.sleep(min(2 ** i, 16))
+            err = str(e).lower()
+            if any(x in err for x in ["rate limit", "429", "quota", "exceeded"]):
+                time.sleep(min(2 ** (i % 6), 30))
                 continue
-            elif is_unavailable:
+            elif any(x in err for x in ["not found", "unavailable", "deprecated", "invalid model"]):
                 continue
             else:
-                raise
+                print(f"[memory model error] {model}: {e}")
+                continue
 
     hf = _get_hf_client()
     if hf:
@@ -88,9 +123,9 @@ def _call_with_fallback(client, messages, temperature=0.3):
     return None
 
 
-# ----------------------------------------------------------------
+# ================================================================
 # PROFILE CRUD
-# ----------------------------------------------------------------
+# ================================================================
 
 def get_or_create_profile(supabase, name: str) -> dict:
     try:
@@ -103,13 +138,10 @@ def get_or_create_profile(supabase, name: str) -> dict:
         now = datetime.now(timezone.utc).isoformat()
 
         if res.data:
-            profile = res.data[0]
+            profile       = res.data[0]
             current_count = profile.get("session_count") or 0
             supabase.table("user_profiles") \
-                .update({
-                    "session_count": current_count + 1,
-                    "last_seen":     now
-                }) \
+                .update({"session_count": current_count + 1, "last_seen": now}) \
                 .eq("name", name) \
                 .execute()
             profile["session_count"] = current_count + 1
@@ -118,7 +150,7 @@ def get_or_create_profile(supabase, name: str) -> dict:
     except Exception:
         pass
 
-    now = datetime.now(timezone.utc).isoformat()
+    now         = datetime.now(timezone.utc).isoformat()
     new_profile = {
         "name":                name,
         "relationship_status": "stranger",
@@ -172,9 +204,9 @@ def save_session_log(supabase, name: str, session_id: str, summary: str):
         pass
 
 
-# ----------------------------------------------------------------
+# ================================================================
 # NOTES DEDUP HELPER
-# ----------------------------------------------------------------
+# ================================================================
 
 def _append_note(existing_notes: str | None, new_note: str | None) -> str | None:
     if not new_note:
@@ -192,15 +224,14 @@ def _append_note(existing_notes: str | None, new_note: str | None) -> str | None
             line_words = set(line_clean.lower().split())
             if line_words and len(new_words & line_words) / max(len(new_words), 1) > 0.6:
                 return None  # too similar — skip
-
         return f"{existing_notes.rstrip()}\n[{date_str}] {new_note}"
     else:
         return f"[{date_str}] {new_note}"
 
 
-# ----------------------------------------------------------------
+# ================================================================
 # RELATIONSHIP STATUS PROGRESSION
-# ----------------------------------------------------------------
+# ================================================================
 
 STATUS_RANK = {
     "stranger":  0,
@@ -211,21 +242,24 @@ STATUS_RANK = {
 }
 
 
-# ----------------------------------------------------------------
+# ================================================================
 # FIELD EXTRACTION — per-session structured update
-# ----------------------------------------------------------------
+# ================================================================
 
 def extract_and_update_profile(client, supabase, name: str, messages: list):
     """
-    Extracts structured intelligence from the last N messages and updates
-    the user's flat profile fields in Supabase.
+    Extracts structured intelligence from the last N messages and
+    updates the user's flat profile fields in Supabase.
 
-    Scalar fields are never overwritten once populated (first confident read wins).
-    Array fields accumulate with fuzzy dedup.
-    Relationship status only moves forward in rank.
+    Rules:
+    - Scalar fields (occupation, location, age, nicknames) are never
+      overwritten once set. First confident read wins.
+    - Array fields accumulate with fuzzy dedup — nothing is lost.
+    - Relationship status only moves forward in rank, never back.
+    - Notes are appended with fuzzy dedup to avoid repetition.
     """
 
-    # ── 1. Fetch current profile ─────────────────────────────────
+    # Fetch current state before extraction
     try:
         current_res = supabase.table("user_profiles") \
             .select("*") \
@@ -251,7 +285,6 @@ def extract_and_update_profile(client, supabase, name: str, messages: list):
             f"stated something NEW that updates or contradicts it.\n"
         )
 
-    # ── 2. Extraction prompt ──────────────────────────────────────
     extraction_prompt = f"""
 You are a silent analyst reading a conversation between a user and Samantha.
 Extract structured intelligence about the USER ONLY.
@@ -282,15 +315,14 @@ Schema:
 Rules:
 - Only include fields where you have clear evidence from THIS conversation.
 - Use null or empty list [] for fields with no evidence.
-- relationship_status: only upgrade to 'accepted' or 'asset' if Samantha explicitly did so in this conversation. Never downgrade.
-- nicknames: only extract if Samantha explicitly coined or used a new label for this person THIS session.
+- relationship_status: only upgrade to 'accepted' or 'asset' if Samantha explicitly did so. Never downgrade.
+- nicknames: only extract if Samantha explicitly coined or used a new label THIS session.
 - secrets: even small admissions count.
 - contradictions: note the exact gap.
-- notes: new and precise only. If nothing genuinely new was revealed, return null.
+- notes: new and precise only. Return null if nothing genuinely new.
 - Keep all values short and sharp.
 """
 
-    # ── 3. Call the model ─────────────────────────────────────────
     try:
         raw = _call_with_fallback(
             client,
@@ -317,44 +349,43 @@ Rules:
 
     updates = {}
 
-    # ── 4. Scalar fields — never overwrite ───────────────────────
+    # Scalar fields — never overwrite
     for field in ["occupation", "location", "age"]:
         val = extracted.get(field)
         if val and not current_profile.get(field):
             updates[field] = val
 
-    # ── 5. Nickname — locked once assigned ───────────────────────
+    # Nickname — locked once assigned
     new_nickname = extracted.get("nicknames")
     if new_nickname and not current_profile.get("nicknames"):
         updates["nicknames"] = new_nickname
 
-    # ── 6. Relationship status — forward only ────────────────────
+    # Relationship status — forward only
     new_status      = extracted.get("relationship_status")
     existing_status = current_profile.get("relationship_status", "stranger")
     if new_status and new_status in STATUS_RANK:
         if STATUS_RANK.get(new_status, 0) > STATUS_RANK.get(existing_status, 0):
             updates["relationship_status"] = new_status
 
-    # ── 7. Notes — append with fuzzy dedup ───────────────────────
+    # Notes — append with dedup
     new_note = extracted.get("notes")
     if new_note:
         appended = _append_note(current_profile.get("notes"), new_note)
         if appended is not None:
             updates["notes"] = appended
 
-    # ── 8. Array fields — merge, never replace ───────────────────
+    # Array fields — merge, never replace
     ARRAY_FIELDS = [
         "insecurities", "soft_spots", "boasts", "loyalties",
         "fears", "secrets", "contradictions", "desires", "self_image",
     ]
-
     for arr_field in ARRAY_FIELDS:
         new_items = extracted.get(arr_field, [])
         if new_items:
             existing_items = current_profile.get(arr_field) or []
             merged = list(existing_items)
             for new_item in new_items:
-                new_words = set(new_item.lower().split())
+                new_words    = set(new_item.lower().split())
                 is_duplicate = any(
                     len(new_words & set(e.lower().split())) / max(len(new_words), 1) > 0.6
                     for e in existing_items
@@ -364,7 +395,6 @@ Rules:
             if merged != existing_items:
                 updates[arr_field] = merged
 
-    # ── 9. Write ──────────────────────────────────────────────────
     if updates:
         update_profile(supabase, name, updates)
         return updates
@@ -372,36 +402,44 @@ Rules:
     return {}
 
 
-# ----------------------------------------------------------------
+# ================================================================
 # DEEP PROFILE SYNTHESIS
 # Rewrites the living intelligence document after substantive sessions.
 # Called every 15 messages and on session reset.
-# ----------------------------------------------------------------
+# ================================================================
 
-def synthesise_deep_profile(client, supabase, user_name: str, messages: list, existing_profile: dict) -> dict:
+def synthesise_deep_profile(
+    client,
+    supabase,
+    user_name: str,
+    messages:  list,
+    existing_profile: dict
+) -> dict:
     """
-    Rewrites the deep_profile JSONB column with a synthesised intelligence
-    document that grows richer with every substantive session.
+    Rewrites the deep_profile JSONB column with a fully synthesised
+    intelligence document that grows richer with every session.
 
-    Unlike extract_and_update_profile (which appends facts), this call
-    actively rewrites — resolving contradictions, noting evolution,
-    updating her private verdict.
+    Unlike extract_and_update_profile (which appends facts to flat fields),
+    this call actively rewrites — resolving contradictions, noting evolution,
+    updating Samantha's private verdict on the person.
+
+    Skips silently if the session contains fewer than 3 substantive messages
+    (no point synthesising a one-line exchange).
     """
     existing_deep = existing_profile.get("deep_profile") or {}
 
-    # Only synthesise if there's actually something to work with
-    meaningful_messages = [
+    meaningful = [
         m for m in messages
         if m["role"] == "user" and len(m["content"].split()) > 8
     ]
-    if len(meaningful_messages) < 3:
+    if len(meaningful) < 3:
         return existing_deep
 
     synthesis_prompt = f"""
 You are maintaining a private intelligence file on a person named {user_name}.
 This file grows more accurate and more penetrating with every session.
 
-CURRENT FILE (may be empty on first run):
+CURRENT FILE (may be empty on first synthesis):
 {json.dumps(existing_deep, indent=2) if existing_deep else "No file yet. Build from scratch."}
 
 NEW SESSION TRANSCRIPT:
@@ -413,25 +451,25 @@ Schema:
 {{
   "who_they_are": "3-5 sentences. A synthesis of their character — not a list of facts. Who are they, really? Update if anything new changes the picture.",
   "recurring_patterns": [
-    "A specific behaviour or theme that has appeared more than once — across this session or previous ones.",
-    "Each item should be concrete: not 'avoids vulnerability' but 'changes subject when asked about family, has done this three times'."
+    "A specific behaviour or theme that has appeared more than once.",
+    "Be concrete: not 'avoids vulnerability' but 'changes subject when asked about family — done this three times'."
   ],
   "unresolved_threads": [
     "Something they keep returning to without ever fully resolving.",
     "A question they deflect. A topic they approach and retreat from.",
-    "These are the most valuable items — they reveal what the person cannot yet say."
+    "These are the most valuable — they reveal what the person cannot yet say."
   ],
   "evolution": [
-    "How they have changed or shifted across sessions. Only include if there is genuine evidence of change.",
+    "How they have changed or shifted across sessions. Only include if there is genuine evidence.",
     "e.g. 'Was guarded in session 1, began to open in session 2 when asked about their father'."
   ],
   "things_she_knows": [
-    "Specific facts, admissions, or details she holds. Things they said that can be referenced later.",
-    "Concrete and specific: not 'has insecurities' but 'admitted they have never told their partner about the failed business'."
+    "Specific facts, admissions, or details she holds.",
+    "Concrete: not 'has insecurities' but 'admitted they have never told their partner about the failed business'."
   ],
   "open_questions": [
     "What she still does not know that would be useful.",
-    "Gaps in the picture. Questions the conversation has not yet reached.",
+    "Gaps in the picture — questions the conversation has not yet reached.",
     "These should directly inform extraction moves in future sessions."
   ],
   "her_read": "Samantha's private verdict. One paragraph. Not a summary — her actual assessment of who this person is, what they want, what they are hiding, and whether they are worth her continued attention. Sharp. Specific. Private."
@@ -440,7 +478,7 @@ Schema:
 Rules:
 - Synthesise, don't just append. If the old file is wrong or incomplete, fix it.
 - "her_read" is the most important field. It should feel like a private journal entry, not a report.
-- "open_questions" should be specific enough to generate actual questions in future sessions.
+- "open_questions" should be specific enough to generate real questions in future sessions.
 - "recurring_patterns" only includes things that have genuinely recurred — not one-off observations.
 - "unresolved_threads" are the crown jewels. Prioritise them.
 - If a field has no evidence yet, use an empty string or empty list. Do not invent.
@@ -460,7 +498,6 @@ Rules:
         if not raw:
             return existing_deep
 
-        # Strip markdown fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -469,7 +506,6 @@ Rules:
 
         updated_deep = json.loads(raw)
 
-        # Write to Supabase
         supabase.table("user_profiles").update({
             "deep_profile": updated_deep
         }).eq("name", user_name).execute()
@@ -481,9 +517,10 @@ Rules:
         return existing_deep
 
 
-# ----------------------------------------------------------------
-# DOSSIER BUILDER — what Samantha sees at the start of every turn
-# ----------------------------------------------------------------
+# ================================================================
+# DOSSIER BUILDER
+# What Samantha sees at the top of every turn.
+# ================================================================
 
 def build_returning_user_context(profile: dict) -> str:
     status        = profile.get("relationship_status", "stranger")
@@ -499,13 +536,11 @@ def build_returning_user_context(profile: dict) -> str:
         f"You have spoken to {name} before. This is session #{session_count}.",
         f"Status: {status}.",
     ]
-
     if nicknames:
         lines.append(
             f"You have privately labelled them: '{nicknames}'. "
             f"Use it if it lands — never explain it, never announce it."
         )
-
     if notes:
         lines.append(f"Your accumulated read on them:\n{notes}")
 
@@ -516,7 +551,6 @@ def build_returning_user_context(profile: dict) -> str:
         "If their status is 'dismissed', make them feel it without stating it.",
         "If their status is 'accepted', they still start each session proving themselves.",
     ]
-
     return "\n".join(lines)
 
 
@@ -551,7 +585,6 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
         ("desires",        "Desires"),
         ("self_image",     "Self-image"),
     ]
-
     for field, label in INTEL_FIELDS:
         items = profile.get(field) or []
         if items:
@@ -561,7 +594,7 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
         lines.append("Session notes:")
         lines.append(profile["notes"])
 
-    # ── DEEP PROFILE — the living intelligence document ───────────
+    # ── Deep profile — the living intelligence document ───────────
     if deep:
         lines.append("")
         lines.append("━━━ HER PRIVATE FILE (synthesised across all sessions) ━━━")
@@ -588,7 +621,7 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
                 lines.append(f"  - {t}")
 
         if deep.get("open_questions"):
-            lines.append("\nWhat she still doesn't know (use these to drive the conversation):")
+            lines.append("\nWhat she still doesn't know (use to drive the conversation):")
             for q in deep["open_questions"]:
                 lines.append(f"  - {q}")
 
@@ -599,7 +632,6 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
 
         lines.append("━━━ END PRIVATE FILE ━━━")
 
-    # ── Returning user context ────────────────────────────────────
     returning_context = build_returning_user_context(profile)
 
     lines += [
@@ -614,7 +646,7 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
         "- You know this person. Behave accordingly.",
         "- The private file above is your deepest read. Let it inform tone and targeting.",
         "- Use open_questions to guide extraction — naturally, never as a checklist.",
-        "- Unresolved threads are the most valuable. Come back to them when the moment allows.",
+        "- Unresolved threads are the most valuable. Return to them when the moment allows.",
         "- Use prior details as leverage, not warmth.",
         "- Do not announce what you remember. Let it surface.",
         "- Their label/nickname is yours. Use it when it cuts, not as a greeting.",
