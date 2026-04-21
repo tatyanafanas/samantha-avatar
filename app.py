@@ -103,6 +103,15 @@ GROQ_TEXT_MODELS = [
     "gemma-7b-it",
     "llama-3.2-3b-preview",
     "llama-3.2-1b-preview",
+    "meta-llama/llama-4-scout-17b-16e-instruct",  # alt path
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "deepseek-r1-distill-llama-70b",
+    "deepseek-r1-distill-qwen-32b",
+    "qwen-qwq-32b",
+    "llama3-70b-8192",
+    "llama3-groq-70b-8192-tool-use-preview",
+    "llama3-groq-8b-8192-tool-use-preview",
+    "llama-guard-3-8b",
     # Deepseek distill models work well but emit <think> blocks —
     # these are stripped automatically by clean_reply() below.
     "deepseek-r1-distill-llama-70b",
