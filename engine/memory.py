@@ -12,6 +12,15 @@ SUMMARY_MODELS = [
     "llama3-8b-8192",
     "mistral-saba-24b",
     "llama-3.1-8b-instant",
+    "meta-llama/llama-4-scout-17b-16e-instruct",  # alt path
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "deepseek-r1-distill-llama-70b",
+    "deepseek-r1-distill-qwen-32b",
+    "qwen-qwq-32b",
+    "llama3-70b-8192",
+    "llama3-groq-70b-8192-tool-use-preview",
+    "llama3-groq-8b-8192-tool-use-preview",
+    "llama-guard-3-8b",
 ]
 
 
