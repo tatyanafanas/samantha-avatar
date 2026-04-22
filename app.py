@@ -7,6 +7,7 @@ import random
 import json
 import base64
 import re
+import requests
 
 # --- IMPORT MODULAR COMPONENTS ---
 from persona.config import STYLES
@@ -86,6 +87,53 @@ hf_client        = init_hf_client()
 
 
 # ================================================================
+# TTS — INWORLD VOICE
+# ================================================================
+
+def speak_as_samantha(text: str) -> bytes | None:
+    """
+    Call Inworld TTS and return raw MP3 bytes.
+    40,000 chars is the per-request ceiling — Samantha rarely
+    exceeds 500 chars per reply, so this is a safety guard only.
+    """
+    if not text or not text.strip():
+        return None
+
+    # Truncate cleanly at sentence boundary if somehow over the limit
+    if len(text) > 40000:
+        text = text[:40000].rsplit('.', 1)[0] + '.'
+
+    url = "https://api.inworld.ai/tts/v1/voice:stream"
+    headers = {
+        "Authorization": f"Basic {st.secrets['INWORLD_API_KEY']}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "text": text,
+        "voice_id": "default-2cyivjkeebcsrpaspvntwg__samantha",
+        "audio_config": {
+            "audio_encoding": "MP3",
+            "speaking_rate": 1.18
+        },
+        "temperature": 1.5,
+        "model_id": "inworld-tts-1.5-max"
+    }
+
+    audio_b64 = ""
+    try:
+        with requests.post(url, json=payload, headers=headers, stream=True) as r:
+            r.raise_for_status()
+            for line in r.iter_lines(decode_unicode=True):
+                if line:
+                    chunk = json.loads(line)
+                    audio_b64 += chunk.get("audioContent", "")
+        return base64.b64decode(audio_b64) if audio_b64 else None
+    except Exception as e:
+        print(f"[TTS error] {e}")
+        return None
+
+
+# ================================================================
 # MODEL LISTS
 # ================================================================
 
@@ -103,7 +151,7 @@ GROQ_TEXT_MODELS = [
     "gemma-7b-it",
     "llama-3.2-3b-preview",
     "llama-3.2-1b-preview",
-    "meta-llama/llama-4-scout-17b-16e-instruct",  # alt path
+    "meta-llama/llama-4-scout-17b-16e-instruct",
     "meta-llama/llama-4-maverick-17b-128e-instruct",
     "deepseek-r1-distill-llama-70b",
     "deepseek-r1-distill-qwen-32b",
@@ -112,8 +160,6 @@ GROQ_TEXT_MODELS = [
     "llama3-groq-70b-8192-tool-use-preview",
     "llama3-groq-8b-8192-tool-use-preview",
     "llama-guard-3-8b",
-    # Deepseek distill models work well but emit <think> blocks —
-    # these are stripped automatically by clean_reply() below.
     "deepseek-r1-distill-llama-70b",
     "deepseek-r1-distill-qwen-32b",
 ]
@@ -178,9 +224,10 @@ if "last_extraction_category" not in st.session_state:
     st.session_state.last_extraction_category = None
 if "last_deep_synthesis_at"   not in st.session_state:
     st.session_state.last_deep_synthesis_at = 0
-# Pending background tasks — processed at end of turn to save API calls
 if "pending_memory_update"    not in st.session_state:
     st.session_state.pending_memory_update = False
+if "voice_enabled"            not in st.session_state:
+    st.session_state.voice_enabled = False
 
 
 # ================================================================
@@ -202,24 +249,11 @@ if not st.session_state.user_name:
 
 # ================================================================
 # REPLY CLEANER
-# Strips <think>...</think> blocks that reasoning models emit.
-# Also trims any other common model artefacts.
 # ================================================================
 
 def clean_reply(text: str) -> str:
-    """
-    Remove chain-of-thought blocks and other model artefacts
-    before showing the reply to the user.
-
-    Handles:
-    - <think>...</think>  (DeepSeek R1, some Qwen models)
-    - <thinking>...</thinking>
-    - Leading/trailing whitespace after stripping
-    """
-    # Strip XML-style think blocks (greedy=False so nested tags don't swallow content)
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    # Strip any leftover empty lines at the top
     text = text.strip()
     return text
 
@@ -236,12 +270,6 @@ def encode_image(uploaded_file) -> tuple[str, str]:
 
 
 def build_user_message(text: str, uploaded_file=None) -> dict:
-    """
-    Build the API message dict.
-    Multimodal when image present; plain text otherwise.
-    Images are NOT stored in session history — only text is kept
-    to prevent base64 blobs inflating the context on every turn.
-    """
     if uploaded_file is None:
         return {"role": "user", "content": text or "."}
     b64, mime = encode_image(uploaded_file)
@@ -340,7 +368,7 @@ Write ONE short opening line in Samantha's voice.
 - Output ONLY the line itself. No preamble, no labels, no reasoning.
 """
     try:
-        raw   = mem_fallback(
+        raw = mem_fallback(
             client,
             messages=[
                 {"role": "system", "content": opener_instruction},
@@ -378,18 +406,10 @@ def _run_deep_synthesis():
 
 # ================================================================
 # BACKGROUND MEMORY UPDATE
-# Batched into a single deferred call at end of turn
-# to reduce the number of API calls per message.
 # ================================================================
 
 def _run_memory_update():
-    """
-    Runs summary + extraction in one deferred block.
-    Called only every 6 messages (not 3) to halve API usage.
-    Summary and extraction share the same model call where possible.
-    """
     try:
-        # Single combined call: summary + extraction hint in one prompt
         combined_prompt = """
 You are a silent analyst. Given this conversation, produce TWO things:
 
@@ -419,16 +439,13 @@ Only include fields with clear evidence. Use null or [] for the rest.
         if not raw:
             return
 
-        # Split summary from JSON
-        # JSON block starts at the first { after the summary paragraph
-        json_start = raw.find("\n{")
+        json_start   = raw.find("\n{")
         if json_start == -1:
             json_start = raw.find("{")
 
-        summary_text  = raw[:json_start].strip() if json_start > 0 else raw.strip()
-        json_text     = raw[json_start:].strip() if json_start > 0 else None
+        summary_text = raw[:json_start].strip() if json_start > 0 else raw.strip()
+        json_text    = raw[json_start:].strip() if json_start > 0 else None
 
-        # Save session summary
         if summary_text:
             save_session_log(
                 supabase,
@@ -437,7 +454,6 @@ Only include fields with clear evidence. Use null or [] for the rest.
                 summary_text
             )
 
-        # Save full transcript snapshot (every 6 messages)
         save_full_transcript(
             supabase,
             st.session_state.user_name,
@@ -445,7 +461,6 @@ Only include fields with clear evidence. Use null or [] for the rest.
             st.session_state.messages
         )
 
-        # Apply extraction if we got valid JSON
         if json_text:
             try:
                 extracted = json.loads(json_text)
@@ -456,7 +471,6 @@ Only include fields with clear evidence. Use null or [] for the rest.
     except Exception as e:
         print(f"[memory update error] {e}")
 
-    # Reload profile after writes
     try:
         st.session_state.user_profile_db = get_or_create_profile(
             supabase, st.session_state.user_name
@@ -469,7 +483,6 @@ Only include fields with clear evidence. Use null or [] for the rest.
 
 
 def _apply_extraction(extracted: dict):
-    """Apply extracted fields to the user profile in Supabase."""
     try:
         current_res = supabase.table("user_profiles") \
             .select("*").eq("name", st.session_state.user_name).limit(1).execute()
@@ -535,6 +548,11 @@ with col1:
             opener  = generate_opener(client, profile_db, dossier)
             if opener:
                 st.session_state.messages.append({"role": "assistant", "content": opener})
+                # Voice the opener if enabled
+                if st.session_state.voice_enabled:
+                    audio_bytes = speak_as_samantha(opener)
+                    if audio_bytes:
+                        st.audio(audio_bytes, format="audio/mp3", autoplay=True)
         st.session_state.opener_injected = True
 
     for msg in st.session_state.messages:
@@ -561,7 +579,6 @@ with col1:
         st.session_state.profile = analyze_interaction(st.session_state.profile, display_txt)
         st.session_state.profile = update_goal(st.session_state.profile)
 
-        # Text-only stored in history — no base64 blobs
         st.session_state.messages.append({"role": "user", "content": display_txt})
 
         with st.chat_message("user"):
@@ -614,7 +631,6 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
         )
         st.session_state.last_extraction_category = cat
 
-        # Prior messages text-only; last message carries image if present
         clean_messages = [
             m for m in st.session_state.messages[:-1]
             if m["role"] in ("user", "assistant") and m["content"].strip()
@@ -634,19 +650,22 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
                 st.caption(f"_(fallback: {model_used})_")
 
             st.session_state.messages.append({"role": "assistant", "content": reply})
+
             with st.chat_message("assistant"):
                 st.markdown(reply)
 
+            # --- VOICE ---
+            if st.session_state.voice_enabled:
+                with st.spinner(""):
+                    audio_bytes = speak_as_samantha(reply)
+                    if audio_bytes:
+                        st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+
             msg_count = len(st.session_state.messages)
 
-            # ── Every 6 messages: combined memory update (was every 3) ──
-            # One combined API call instead of two separate ones —
-            # halves the background API usage.
             if msg_count % 6 == 0:
                 _run_memory_update()
 
-            # ── Every 18 messages: deep profile synthesis ────────────────
-            # (was every 15 — slightly more space between heavy calls)
             if (msg_count - st.session_state.last_deep_synthesis_at) >= 18:
                 _run_deep_synthesis()
 
@@ -660,6 +679,15 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
 
 with col2:
     st.markdown("### The Dossier")
+
+    # --- VOICE TOGGLE ---
+    st.session_state.voice_enabled = st.toggle(
+        "🎙️ Her Voice",
+        value=st.session_state.voice_enabled,
+        help="Stream her replies as audio via Inworld TTS."
+    )
+
+    st.markdown("---")
 
     st.metric("Current Aura",      st.session_state.profile["mood"])
     st.metric("Current Objective", st.session_state.profile["goal"])
@@ -708,7 +736,6 @@ with col2:
 
     if st.button("Reset Interaction"):
         if st.session_state.messages and client:
-            # Save full transcript and run deep synthesis before clearing
             save_full_transcript(
                 supabase,
                 st.session_state.user_name,
