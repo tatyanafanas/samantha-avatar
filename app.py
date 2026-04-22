@@ -371,7 +371,13 @@ def generate_opener(client, profile, dossier):
     name     = profile.get("name", "")
     status   = profile.get("relationship_status", "stranger")
     nickname = profile.get("nicknames", "")
-    deep     = profile.get("deep_profile") or {}
+    deep = profile.get("deep_profile") or {}
+    if isinstance(deep, str):
+        try:
+            import json
+            deep = json.loads(deep)
+        except Exception:
+            deep = {}
     her_read = deep.get("her_read", "")
     notes    = profile.get("notes", "")
 
