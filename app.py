@@ -90,22 +90,27 @@ hf_client        = init_hf_client()
 # TTS — INWORLD VOICE
 # ================================================================
 
-def speak_as_samantha(text: str) -> bytes | None:
+def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
     """
-    Call Inworld TTS and return raw MP3 bytes.
-    40,000 chars is the per-request ceiling — Samantha rarely
-    exceeds 500 chars per reply, so this is a safety guard only.
+    Call Inworld TTS. Returns (mp3_bytes_or_None, debug_message).
+    Debug message explains exactly what happened at each step.
     """
+    # --- Guard: empty text ---
     if not text or not text.strip():
-        return None
+        return None, "TTS skipped: empty text"
 
-    # Truncate cleanly at sentence boundary if somehow over the limit
+    # --- Guard: API key present ---
+    api_key = st.secrets.get("INWORLD_API_KEY", "")
+    if not api_key:
+        return None, "TTS failed: INWORLD_API_KEY not found in secrets"
+
+    # --- Guard: truncate if needed ---
     if len(text) > 40000:
         text = text[:40000].rsplit('.', 1)[0] + '.'
 
     url = "https://api.inworld.ai/tts/v1/voice:stream"
     headers = {
-        "Authorization": f"Basic {st.secrets['INWORLD_API_KEY']}",
+        "Authorization": f"Basic {api_key}",
         "Content-Type": "application/json"
     }
     payload = {
@@ -119,18 +124,65 @@ def speak_as_samantha(text: str) -> bytes | None:
         "model_id": "inworld-tts-1.5-max"
     }
 
-    audio_b64 = ""
+    audio_b64   = ""
+    lines_seen  = 0
+    chunks_seen = 0
+
     try:
-        with requests.post(url, json=payload, headers=headers, stream=True) as r:
-            r.raise_for_status()
+        with requests.post(url, json=payload, headers=headers, stream=True, timeout=20) as r:
+            # --- Check HTTP status ---
+            if r.status_code != 200:
+                return None, f"TTS failed: HTTP {r.status_code} — {r.text[:200]}"
+
             for line in r.iter_lines(decode_unicode=True):
-                if line:
+                if not line:
+                    continue
+                lines_seen += 1
+                try:
                     chunk = json.loads(line)
-                    audio_b64 += chunk.get("audioContent", "")
-        return base64.b64decode(audio_b64) if audio_b64 else None
+                except json.JSONDecodeError as je:
+                    return None, f"TTS failed: JSON parse error on line {lines_seen}: {je} | raw: {line[:80]}"
+
+                content = chunk.get("audioContent", "")
+                if content:
+                    audio_b64  += content
+                    chunks_seen += 1
+
+        # --- Guard: did we get any audio data? ---
+        if not audio_b64:
+            return None, f"TTS failed: request succeeded ({lines_seen} lines) but audioContent was empty"
+
+        mp3_bytes = base64.b64decode(audio_b64)
+        return mp3_bytes, f"TTS OK: {chunks_seen} chunks, {len(mp3_bytes):,} bytes"
+
+    except requests.exceptions.Timeout:
+        return None, "TTS failed: request timed out after 20s"
+    except requests.exceptions.ConnectionError as ce:
+        return None, f"TTS failed: connection error — {ce}"
     except Exception as e:
-        print(f"[TTS error] {e}")
-        return None
+        return None, f"TTS failed: unexpected error — {type(e).__name__}: {e}"
+
+
+def play_voice(text: str, location_label: str = ""):
+    """
+    Call TTS, play audio if we got bytes, always show debug status.
+    location_label helps identify in the UI where playback was attempted.
+    """
+    audio_bytes, debug_msg = speak_as_samantha(text)
+
+    # Always show the debug status so we can see what's happening
+    if audio_bytes:
+        # Use HTML audio element — more reliable than st.audio for autoplay
+        b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
+        audio_html = f"""
+        <audio autoplay controls style="width:100%; margin-top:4px;">
+            <source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">
+        </audio>
+        """
+        st.markdown(audio_html, unsafe_allow_html=True)
+        st.caption(f"🔊 {location_label} {debug_msg}")
+    else:
+        st.warning(f"🔇 {location_label} {debug_msg}")
 
 
 # ================================================================
@@ -156,12 +208,9 @@ GROQ_TEXT_MODELS = [
     "deepseek-r1-distill-llama-70b",
     "deepseek-r1-distill-qwen-32b",
     "qwen-qwq-32b",
-    "llama3-70b-8192",
     "llama3-groq-70b-8192-tool-use-preview",
     "llama3-groq-8b-8192-tool-use-preview",
     "llama-guard-3-8b",
-    "deepseek-r1-distill-llama-70b",
-    "deepseek-r1-distill-qwen-32b",
 ]
 
 GROQ_VISION_MODELS = [
@@ -228,6 +277,8 @@ if "pending_memory_update"    not in st.session_state:
     st.session_state.pending_memory_update = False
 if "voice_enabled"            not in st.session_state:
     st.session_state.voice_enabled = False
+if "tts_debug"                not in st.session_state:
+    st.session_state.tts_debug = []
 
 
 # ================================================================
@@ -548,11 +599,8 @@ with col1:
             opener  = generate_opener(client, profile_db, dossier)
             if opener:
                 st.session_state.messages.append({"role": "assistant", "content": opener})
-                # Voice the opener if enabled
                 if st.session_state.voice_enabled:
-                    audio_bytes = speak_as_samantha(opener)
-                    if audio_bytes:
-                        st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+                    play_voice(opener, "[opener]")
         st.session_state.opener_injected = True
 
     for msg in st.session_state.messages:
@@ -656,10 +704,7 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
 
             # --- VOICE ---
             if st.session_state.voice_enabled:
-                with st.spinner(""):
-                    audio_bytes = speak_as_samantha(reply)
-                    if audio_bytes:
-                        st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+                play_voice(reply, "[reply]")
 
             msg_count = len(st.session_state.messages)
 
@@ -680,12 +725,49 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
 with col2:
     st.markdown("### The Dossier")
 
-    # --- VOICE TOGGLE ---
-    st.session_state.voice_enabled = st.toggle(
-        "🎙️ Her Voice",
-        value=st.session_state.voice_enabled,
-        help="Stream her replies as audio via Inworld TTS."
+    # --- VOICE TOGGLE — clear on/off state ---
+    voice_on = st.session_state.voice_enabled
+
+    if voice_on:
+        st.success("🔊 **Voice: ON** — She will speak.")
+    else:
+        st.info("🔇 **Voice: OFF** — Silent mode.")
+
+    toggle_val = st.toggle(
+        "Activate her voice",
+        value=voice_on,
+        key="voice_toggle",
+        help="Uses Inworld TTS. Toggle on, then send a message."
     )
+
+    # Persist toggle state across reruns
+    if toggle_val != voice_on:
+        st.session_state.voice_enabled = toggle_val
+        st.rerun()
+
+    # --- TTS DEBUG PANEL ---
+    with st.expander("🛠 TTS Diagnostics", expanded=not voice_on):
+        api_key = st.secrets.get("INWORLD_API_KEY", "")
+        if api_key:
+            st.caption(f"✅ INWORLD_API_KEY found — starts with: `{api_key[:8]}...`")
+        else:
+            st.error("❌ INWORLD_API_KEY missing from secrets")
+
+        if st.button("🔬 Test TTS now"):
+            test_text = "You came here for a reason. Let's find out what it is."
+            st.caption(f"Sending: _{test_text}_")
+            audio_bytes, debug_msg = speak_as_samantha(test_text)
+            if audio_bytes:
+                st.success(debug_msg)
+                b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
+                audio_html = f"""
+                <audio autoplay controls style="width:100%; margin-top:4px;">
+                    <source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">
+                </audio>
+                """
+                st.markdown(audio_html, unsafe_allow_html=True)
+            else:
+                st.error(debug_msg)
 
     st.markdown("---")
 
@@ -720,6 +802,11 @@ with col2:
                 st.caption(f"Soft spots: {', '.join(spots)}")
 
         deep = db.get("deep_profile") or {}
+        if isinstance(deep, str):
+            try:
+                deep = json.loads(deep)
+            except Exception:
+                deep = {}
         if deep.get("her_read"):
             st.markdown("---")
             st.markdown("**Private File**")
