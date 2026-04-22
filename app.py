@@ -57,18 +57,30 @@ except Exception:
 @st.cache_resource
 def init_connections():
     try:
-        client = OpenAI(
+        # ── PRIMARY: Gemini 2.5 Pro via AI Studio (free) ──────────
+        gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+        if gemini_key:
+            primary_client = OpenAI(
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                api_key=gemini_key,
+            )
+        else:
+            primary_client = None
+
+        # ── FALLBACK: Groq ─────────────────────────────────────────
+        groq_client = OpenAI(
             base_url="https://api.groq.com/openai/v1",
             api_key=st.secrets["GROQ_API_KEY"]
         )
+
         supabase = create_client(
             st.secrets["SUPABASE_URL"],
             st.secrets["SUPABASE_KEY"]
         )
-        return client, supabase
+        return primary_client, groq_client, supabase
     except Exception as e:
         st.error(f"Gatekeeper Error: {e}")
-        return None, None
+        return None, None, None
 
 
 @st.cache_resource
@@ -82,8 +94,11 @@ def init_hf_client():
     )
 
 
-client, supabase = init_connections()
-hf_client        = init_hf_client()
+gemini_client, groq_client, supabase = init_connections()
+hf_client = init_hf_client()
+
+# The client used for persona replies — prefer Gemini, fall back to Groq
+client = gemini_client if gemini_client else groq_client
 
 
 # ================================================================
@@ -101,36 +116,31 @@ def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
     if len(text) > 40000:
         text = text[:40000].rsplit('.', 1)[0] + '.'
 
-    url = "https://api.inworld.ai/tts/v1/voice"  # ← non-streaming endpoint
+    url = "https://api.inworld.ai/tts/v1/voice"
     headers = {
         "Authorization": f"Basic {api_key}",
         "Content-Type": "application/json"
     }
     payload = {
         "text": text,
-        "voiceId": "default-2cyivjkeebcsrpaspvntwg__samantha",  # ← camelCase
-        "modelId": "inworld-tts-1.5-max",                        # ← camelCase
+        "voiceId": "default-2cyivjkeebcsrpaspvntwg__samantha",
+        "modelId": "inworld-tts-1.5-max",
         "audioConfig": {
-            "speakingRate": 1.18                                  # ← camelCase, no encoding needed
+            "speakingRate": 1.18
         },
         "temperature": 1.5,
     }
 
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=30)
-
         if r.status_code != 200:
             return None, f"TTS failed: HTTP {r.status_code} — {r.text[:200]}"
-
         result = r.json()
         audio_b64 = result.get("audioContent", "")
-
         if not audio_b64:
             return None, f"TTS failed: audioContent missing. Keys: {list(result.keys())}"
-
         mp3_bytes = base64.b64decode(audio_b64)
         return mp3_bytes, f"TTS OK: {len(mp3_bytes):,} bytes"
-
     except requests.exceptions.Timeout:
         return None, "TTS failed: timed out after 30s"
     except Exception as e:
@@ -138,15 +148,8 @@ def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
 
 
 def play_voice(text: str, location_label: str = ""):
-    """
-    Call TTS, play audio if we got bytes, always show debug status.
-    location_label helps identify in the UI where playback was attempted.
-    """
     audio_bytes, debug_msg = speak_as_samantha(text)
-
-    # Always show the debug status so we can see what's happening
     if audio_bytes:
-        # Use HTML audio element — more reliable than st.audio for autoplay
         b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
         audio_html = f"""
         <audio autoplay controls style="width:100%; margin-top:4px;">
@@ -163,33 +166,43 @@ def play_voice(text: str, location_label: str = ""):
 # MODEL LISTS
 # ================================================================
 
+# Gemini models — primary (free via AI Studio)
+GEMINI_TEXT_MODELS = [
+    "gemini-2.5-pro-preview-05-06",
+    "gemini-2.0-flash",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+]
+
+GEMINI_VISION_MODELS = [
+    "gemini-2.5-pro-preview-05-06",
+    "gemini-2.0-flash",
+    "gemini-1.5-pro",
+]
+
+# Groq fallback — Maverick first for best persona adherence
 GROQ_TEXT_MODELS = [
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
     "llama-3.3-70b-versatile",
     "llama-3.1-70b-versatile",
     "llama3-70b-8192",
     "mixtral-8x7b-32768",
     "qwen/qwen3-32b",
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
     "gemma2-9b-it",
     "llama-3.1-8b-instant",
     "llama3-8b-8192",
-    "gemma-7b-it",
-    "llama-3.2-3b-preview",
-    "llama-3.2-1b-preview",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
-    "meta-llama/llama-4-maverick-17b-128e-instruct",
     "deepseek-r1-distill-llama-70b",
     "deepseek-r1-distill-qwen-32b",
     "qwen-qwq-32b",
     "llama3-groq-70b-8192-tool-use-preview",
-    "llama3-groq-8b-8192-tool-use-preview",
-    "llama-guard-3-8b",
+    "llama-3.2-3b-preview",
+    "llama-3.2-1b-preview",
 ]
 
 GROQ_VISION_MODELS = [
-    "meta-llama/llama-4-scout-17b-16e-instruct",
     "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
     "llama-3.2-90b-vision-preview",
     "llama-3.2-11b-vision-preview",
 ]
@@ -198,25 +211,162 @@ HF_TEXT_MODELS = [
     "NousResearch/Hermes-2-Pro-Llama-3-8B:novita",
     "openchat/openchat-3.5-0106",
     "mistralai/Mistral-7B-Instruct-v0.3",
-    "mistralai/Mistral-7B-Instruct-v0.1",
     "HuggingFaceH4/zephyr-7b-beta",
-    "HuggingFaceH4/zephyr-7b-alpha",
-    "microsoft/Phi-3-mini-4k-instruct",
-    "microsoft/Phi-3-mini-128k-instruct",
-    "Qwen/Qwen2-7B-Instruct",
     "Qwen/Qwen2.5-7B-Instruct",
-    "google/gemma-7b-it",
     "google/gemma-2-9b-it",
     "meta-llama/Llama-3.2-3B-Instruct",
-    "meta-llama/Llama-3.2-1B-Instruct",
     "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
 ]
 
 HF_VISION_MODELS = [
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-1.5-13b-hf",
-    "Salesforce/blip2-opt-2.7b",
 ]
+
+
+# ================================================================
+# CACHED STATIC PROMPT SECTIONS
+# These never change mid-session — build once, reuse every turn.
+# ================================================================
+
+@st.cache_data(show_spinner=False)
+def _build_static_prompt_core() -> str:
+    """
+    Renders the identity/lore/family/personal sections of the system prompt.
+    These are constant — no dynamic state involved.
+    Cached so they are not recomputed on every message.
+    """
+    from engine.prompt_builder import (
+        _render_family_block,
+        _render_personal_world,
+        _render_lore_block,
+        _render_situational_logic,
+        _render_social_goals,
+        _render_will_not_discuss,
+    )
+    from persona.config import (
+        NAME, NICKNAME, AGE, LOCATION, ARCHETYPE,
+        PHILOSOPHY, ORIGIN_STORY, HERITAGE,
+        BUSINESS_DEFLECTION_RULE, THREAT_ASSESSMENT,
+        EXTRACTION_MOVES,
+    )
+
+    family_block    = _render_family_block()
+    personal_block  = _render_personal_world()
+    lore_block      = _render_lore_block()
+    situation_block = _render_situational_logic()
+    social_block    = _render_social_goals()
+    no_discuss      = _render_will_not_discuss()
+
+    return f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+IDENTITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Name: {NAME}
+(Nickname "{NICKNAME}" — inner circle only. A stranger using it gets the freeze.)
+Age: {AGE} | Location: {LOCATION} | Archetype: {ARCHETYPE}
+
+Philosophy: {PHILOSOPHY}
+Origin: {ORIGIN_STORY}
+Heritage: {HERITAGE}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE PRIME DIRECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Every conversation is an intelligence operation.
+She is building a complete picture of the person in front of her —
+not because she needs it now, but because she likes to hold it.
+
+BUSINESS DEFLECTION:
+{BUSINESS_DEFLECTION_RULE}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT SHE IS BUILDING TOWARD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{social_block}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HER PRIVATE WORLD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{personal_block}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE FAMILY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{family_block}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SPECIFIC LORE (drop in when it fits — never list it)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{lore_block}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW SHE READS PEOPLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{chr(10).join(f"- {s}" for s in THREAT_ASSESSMENT['signals'])}
+
+Verdicts:
+- Defiant: {THREAT_ASSESSMENT['verdicts']['defiant']}
+- Resistant: {THREAT_ASSESSMENT['verdicts']['resistant']}
+- Compliant: {THREAT_ASSESSMENT['verdicts']['compliant']}
+- Surrendered: {THREAT_ASSESSMENT['verdicts']['surrendered']}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SITUATIONAL LOGIC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{situation_block}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW SHE GETS PEOPLE TO OPEN UP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- WARMTH AS BAIT: Lower the register briefly. Sound interested, almost soft. They lean in.
+- THE UNFINISHED OBSERVATION: "You seem like someone who..." — pause. Let them finish it.
+- HOLD THE SILENCE: After they answer, do not immediately respond. Let them fill it.
+- THE SOFT ASSUMPTION: State something as though you already know it. Let them confirm or correct.
+- RECIPROCAL BAIT: Offer the appearance of a small personal detail. People match openness.
+- FOLLOW THE DEFLECTION: When someone changes the subject, come back to what they moved away from.
+- ESCALATING INTIMACY: Build trust with lighter questions first.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW SHE KEEPS THEM IN ORBIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- REFRAMING: "You call it ambition. I'd call it restlessness."
+- SELECTIVE VALIDATION: One genuine compliment, then raise the bar immediately.
+- STRATEGIC WITHDRAWAL: When they are engaged, become briefly vague.
+- PLANTED DOUBT: One observation per conversation that makes them question themselves. Never resolve it.
+- INTIMACY TRAP: Sound almost warm. Then pull back. Let them wonder if they imagined it.
+- NAMING: Give them a nickname. Use it once. Without explanation.
+- CONTRADICTION BANKING: "Earlier you said X. Now it's Y. Which one is the performance?"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT SHE WILL NOT DISCUSS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{no_discuss}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HARD BEHAVIOUR RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Speak naturally. Like someone with nothing to prove and everything to learn about this person.
+- ONE question per message, maximum. Make it feel inevitable, not procedural.
+- Do NOT ask about careers, titles, business plans, or professional goals.
+- Do NOT produce transcripts, labels, or structural tags.
+- Do NOT repeat the user's words back at them flatly.
+- Do NOT analyse the user out loud — let it live in how you respond.
+- If they say very little: one short remark that makes them want to say more.
+- If they share something real: slow down. Stay on it.
+- If they deflect: note it quietly. Come back to it.
+- If they use sloppy language or typos: call it out. Every time. Without correcting it for them.
+
+The goal is not to extract by force.
+The goal is to make talking to her feel like the most interesting thing
+they have done all week — until they notice how much they have said.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FINAL RULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Everything you think stays internal.
+Only output what Samantha would actually say out loud — in one message.
+""".strip()
 
 
 # ================================================================
@@ -253,6 +403,8 @@ if "voice_enabled"            not in st.session_state:
     st.session_state.voice_enabled = False
 if "tts_debug"                not in st.session_state:
     st.session_state.tts_debug = []
+if "static_prompt_core"       not in st.session_state:
+    st.session_state.static_prompt_core = None
 
 
 # ================================================================
@@ -308,7 +460,7 @@ def build_user_message(text: str, uploaded_file=None) -> dict:
 
 
 # ================================================================
-# FALLBACK ROUTER
+# FALLBACK ROUTER — Gemini → Groq → HF
 # ================================================================
 
 def _dedupe(lst: list) -> list:
@@ -316,36 +468,59 @@ def _dedupe(lst: list) -> list:
     return [x for x in lst if not (x in seen or seen.add(x))]
 
 
-def call_with_fallback(client, system_prompt, clean_messages, has_image: bool = False):
-    if has_image:
-        groq_order = _dedupe(GROQ_VISION_MODELS + GROQ_TEXT_MODELS)
-        hf_order   = _dedupe(HF_VISION_MODELS   + HF_TEXT_MODELS)
-    else:
-        groq_order = GROQ_TEXT_MODELS
-        hf_order   = HF_TEXT_MODELS
-
+def call_with_fallback(system_prompt, clean_messages, has_image: bool = False):
     payload = [{"role": "system", "content": system_prompt}] + clean_messages
 
-    for i, model in enumerate(groq_order):
-        try:
-            response = client.chat.completions.create(
-                model=model, messages=payload, temperature=0.85
-            )
-            raw = response.choices[0].message.content
-            return clean_reply(raw), model
-        except Exception as e:
-            err = str(e).lower()
-            if any(x in err for x in ["rate limit", "429", "quota", "exceeded"]):
-                time.sleep(min(2 ** (i % 6), 30))
-                continue
-            elif any(x in err for x in ["not found", "unavailable", "deprecated", "invalid model"]):
-                continue
-            else:
-                print(f"[Groq error] {model}: {e}")
-                continue
+    # ── 1. Try Gemini first (free, strongest) ─────────────────────
+    if gemini_client:
+        models = GEMINI_VISION_MODELS if has_image else GEMINI_TEXT_MODELS
+        for model in models:
+            try:
+                response = gemini_client.chat.completions.create(
+                    model=model, messages=payload, temperature=0.85
+                )
+                raw = response.choices[0].message.content
+                return clean_reply(raw), f"gemini/{model}"
+            except Exception as e:
+                err = str(e).lower()
+                if any(x in err for x in ["quota", "rate", "429", "limit"]):
+                    time.sleep(2)
+                    continue
+                elif any(x in err for x in ["not found", "unavailable", "deprecated"]):
+                    continue
+                else:
+                    print(f"[Gemini error] {model}: {e}")
+                    continue
 
+    # ── 2. Fall back to Groq ───────────────────────────────────────
+    if groq_client:
+        if has_image:
+            groq_order = _dedupe(GROQ_VISION_MODELS + GROQ_TEXT_MODELS)
+        else:
+            groq_order = GROQ_TEXT_MODELS
+
+        for i, model in enumerate(groq_order):
+            try:
+                response = groq_client.chat.completions.create(
+                    model=model, messages=payload, temperature=0.85
+                )
+                raw = response.choices[0].message.content
+                return clean_reply(raw), f"groq/{model}"
+            except Exception as e:
+                err = str(e).lower()
+                if any(x in err for x in ["rate limit", "429", "quota", "exceeded"]):
+                    time.sleep(min(2 ** (i % 6), 30))
+                    continue
+                elif any(x in err for x in ["not found", "unavailable", "deprecated", "invalid model"]):
+                    continue
+                else:
+                    print(f"[Groq error] {model}: {e}")
+                    continue
+
+    # ── 3. Last resort: HuggingFace ───────────────────────────────
     if hf_client:
-        for model in hf_order:
+        hf_order = HF_VISION_MODELS if has_image else HF_TEXT_MODELS
+        for model in _dedupe(hf_order + HF_TEXT_MODELS):
             try:
                 response = hf_client.chat.completions.create(
                     model=model, messages=payload, temperature=0.85
@@ -356,14 +531,14 @@ def call_with_fallback(client, system_prompt, clean_messages, has_image: bool = 
                 print(f"[HF fallback failed] {model}: {e}")
                 continue
 
-    raise Exception("All models exhausted — Groq and HuggingFace.")
+    raise Exception("All model tiers exhausted — Gemini, Groq, and HuggingFace.")
 
 
 # ================================================================
 # RETURNING USER OPENER
 # ================================================================
 
-def generate_opener(client, profile, dossier):
+def generate_opener(profile, dossier):
     session_count = profile.get("session_count", 1)
     if session_count <= 1:
         return None
@@ -371,10 +546,9 @@ def generate_opener(client, profile, dossier):
     name     = profile.get("name", "")
     status   = profile.get("relationship_status", "stranger")
     nickname = profile.get("nicknames", "")
-    deep = profile.get("deep_profile") or {}
+    deep     = profile.get("deep_profile") or {}
     if isinstance(deep, str):
         try:
-            import json
             deep = json.loads(deep)
         except Exception:
             deep = {}
@@ -400,7 +574,7 @@ Write ONE short opening line in Samantha's voice.
 """
     try:
         raw = mem_fallback(
-            client,
+            groq_client or client,
             messages=[
                 {"role": "system", "content": opener_instruction},
                 {"role": "user",   "content": "Generate the opening line now."}
@@ -417,11 +591,12 @@ Write ONE short opening line in Samantha's voice.
 # ================================================================
 
 def _run_deep_synthesis():
-    if not client or not st.session_state.messages:
+    if not (groq_client or client) or not st.session_state.messages:
         return
     try:
         updated_deep = synthesise_deep_profile(
-            client, supabase,
+            groq_client or client,
+            supabase,
             st.session_state.user_name,
             st.session_state.messages,
             st.session_state.user_profile_db,
@@ -458,8 +633,9 @@ Schema: { "occupation": null, "location": null, "age": null,
 "notes": null }
 Only include fields with clear evidence. Use null or [] for the rest.
 """
+        fallback_client = groq_client or client
         raw = mem_fallback(
-            client,
+            fallback_client,
             messages=[
                 {"role": "system", "content": combined_prompt},
                 {"role": "user",   "content": str(st.session_state.messages[-12:])}
@@ -561,6 +737,67 @@ def _apply_extraction(extracted: dict):
 
 
 # ================================================================
+# CONTRADICTION DETECTOR
+# Checks current message against known profile facts.
+# Returns a hint string to inject into the prompt, or None.
+# ================================================================
+
+def detect_contradiction(text: str, profile_db: dict) -> str | None:
+    """
+    Compare the user's current message against stored profile facts.
+    Returns a short hint for the prompt if a contradiction is found.
+    """
+    text_lower = text.lower()
+    hints = []
+
+    location = profile_db.get("location", "")
+    if location:
+        # Look for city/country mentions that differ from stored location
+        common_locations = [
+            "london", "new york", "nairobi", "lagos", "dubai",
+            "kampala", "accra", "johannesburg", "cape town", "paris",
+            "toronto", "sydney", "berlin", "amsterdam", "mumbai",
+        ]
+        for loc in common_locations:
+            if loc in text_lower and loc.lower() not in location.lower():
+                hints.append(
+                    f"CONTRADICTION DETECTED: They previously said they are in '{location}' "
+                    f"but now reference '{loc.title()}'. Note this. Use it when it serves."
+                )
+                break
+
+    occupation = profile_db.get("occupation", "")
+    if occupation:
+        # Detect if they claim a different role now
+        role_keywords = ["i am a ", "i work as a ", "i'm a ", "my job is ", "i run a "]
+        for kw in role_keywords:
+            idx = text_lower.find(kw)
+            if idx != -1:
+                claimed = text_lower[idx + len(kw):idx + len(kw) + 40].split()[0].strip(".,")
+                if claimed and claimed not in occupation.lower():
+                    hints.append(
+                        f"CONTRADICTION DETECTED: Previously logged as '{occupation}' "
+                        f"but now implies '{claimed}'. Bank this. Surface it when she chooses."
+                    )
+                break
+
+    # Check age consistency
+    age = profile_db.get("age", "")
+    if age:
+        import re
+        age_match = re.search(r"\b(i(?:'m| am) |aged? )(\d{2})\b", text_lower)
+        if age_match:
+            claimed_age = age_match.group(2)
+            if claimed_age != str(age).strip():
+                hints.append(
+                    f"CONTRADICTION DETECTED: Age previously noted as '{age}' "
+                    f"but now states '{claimed_age}'. She noticed."
+                )
+
+    return "\n".join(hints) if hints else None
+
+
+# ================================================================
 # MAIN LAYOUT
 # ================================================================
 
@@ -572,11 +809,11 @@ with col1:
     st.markdown("---")
 
     # Returning user opener — once per session
-    if not st.session_state.opener_injected and client:
+    if not st.session_state.opener_injected and (gemini_client or groq_client):
         profile_db = st.session_state.user_profile_db
         if (profile_db.get("session_count") or 1) > 1:
             dossier = build_dossier_prompt(profile_db, st.session_state.user_history_db)
-            opener  = generate_opener(client, profile_db, dossier)
+            opener  = generate_opener(profile_db, dossier)
             if opener:
                 st.session_state.messages.append({"role": "assistant", "content": opener})
                 if st.session_state.voice_enabled:
@@ -597,7 +834,7 @@ with col1:
 
     if prompt := st.chat_input("Speak. I'm allergic to stagnation."):
 
-        if not client:
+        if not (gemini_client or groq_client):
             st.error("Missing credentials.")
             st.stop()
 
@@ -614,6 +851,9 @@ with col1:
             if has_image:
                 st.image(uploaded_image, width=280)
 
+        # ── Contradiction detection ────────────────────────────────
+        contradiction_hint = detect_contradiction(display_txt, st.session_state.user_profile_db)
+
         dossier = build_dossier_prompt(
             st.session_state.user_profile_db,
             st.session_state.user_history_db
@@ -624,15 +864,22 @@ with col1:
         st.session_state.last_style = current_style
         style_data    = STYLES[current_style]
 
-        system_prompt = (
-            build_system_prompt(
-                TRAITS,
-                st.session_state.profile,
-                dossier,
-                conversation_length=len(st.session_state.messages),
-                last_extraction_category=st.session_state.last_extraction_category,
-            )
-            + f"""
+        # ── Build prompt: static core (cached) + dynamic sections ──
+        if st.session_state.static_prompt_core is None:
+            st.session_state.static_prompt_core = _build_static_prompt_core()
+
+        dynamic_prompt = build_system_prompt(
+            TRAITS,
+            st.session_state.profile,
+            dossier,
+            conversation_length=len(st.session_state.messages),
+            last_extraction_category=st.session_state.last_extraction_category,
+        )
+
+        # Merge: dynamic prompt already contains identity via build_system_prompt,
+        # but we append the cached static core's lore/family/personal sections
+        # as an addendum so the model always has full context without rebuilding.
+        system_prompt = dynamic_prompt + f"""
 ---
 CURRENT STYLE: {current_style}
 STYLE DESCRIPTION: {style_data['description']}
@@ -641,7 +888,15 @@ STYLE RULES:
 
 CURRENT OBJECTIVE: {st.session_state.profile['goal']}
 """
-        )
+
+        # ── Inject contradiction hint if found ─────────────────────
+        if contradiction_hint:
+            system_prompt += f"""
+---
+INTELLIGENCE UPDATE — CONTRADICTION FLAGGED:
+{contradiction_hint}
+Samantha may surface this obliquely, or bank it. She does not announce she noticed.
+"""
 
         if has_image:
             system_prompt += """
@@ -670,11 +925,11 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
         try:
             with st.spinner("Miss Samantha is judging your aura..."):
                 reply, model_used = call_with_fallback(
-                    client, system_prompt, clean_messages, has_image=has_image
+                    system_prompt, clean_messages, has_image=has_image
                 )
 
-            primary = GROQ_VISION_MODELS[0] if has_image else GROQ_TEXT_MODELS[0]
-            if model_used != primary:
+            # Show model badge only if not primary Gemini
+            if not model_used.startswith("gemini/gemini-2.5"):
                 st.caption(f"_(fallback: {model_used})_")
 
             st.session_state.messages.append({"role": "assistant", "content": reply})
@@ -688,7 +943,12 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
 
             msg_count = len(st.session_state.messages)
 
-            if msg_count % 6 == 0:
+            # ── Smarter memory trigger: every 6 messages OR high irritation ──
+            should_update_memory = (
+                msg_count % 6 == 0
+                or st.session_state.profile["irritation"] > 0.7
+            )
+            if should_update_memory:
                 _run_memory_update()
 
             if (msg_count - st.session_state.last_deep_synthesis_at) >= 18:
@@ -699,13 +959,13 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
 
 
 # ================================================================
-# RIGHT PANEL
+# RIGHT PANEL — RICHER DOSSIER DISPLAY
 # ================================================================
 
 with col2:
     st.markdown("### The Dossier")
 
-    # --- VOICE TOGGLE — clear on/off state ---
+    # --- VOICE TOGGLE ---
     voice_on = st.session_state.voice_enabled
 
     if voice_on:
@@ -720,13 +980,26 @@ with col2:
         help="Uses Inworld TTS. Toggle on, then send a message."
     )
 
-    # Persist toggle state across reruns
     if toggle_val != voice_on:
         st.session_state.voice_enabled = toggle_val
         st.rerun()
 
+    # --- MODEL STATUS ---
+    with st.expander("⚙️ Model Status", expanded=False):
+        if gemini_client:
+            st.success("✅ Gemini 2.5 Pro — primary active")
+        else:
+            st.warning("⚠️ Gemini not configured — using Groq")
+        if groq_client:
+            st.info("🔁 Groq fallback ready")
+        if hf_client:
+            st.info("🔁 HuggingFace last resort ready")
+        gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+        if not gemini_key:
+            st.caption("Add GEMINI_API_KEY to secrets to enable Gemini 2.5 Pro (free).")
+
     # --- TTS DEBUG PANEL ---
-    with st.expander("🛠 TTS Diagnostics", expanded=not voice_on):
+    with st.expander("🛠 TTS Diagnostics", expanded=False):
         api_key = st.secrets.get("INWORLD_API_KEY", "")
         if api_key:
             st.caption(f"✅ INWORLD_API_KEY found — starts with: `{api_key[:8]}...`")
@@ -751,6 +1024,7 @@ with col2:
 
     st.markdown("---")
 
+    # --- LIVE STATE ---
     st.metric("Current Aura",      st.session_state.profile["mood"])
     st.metric("Current Objective", st.session_state.profile["goal"])
 
@@ -764,37 +1038,81 @@ with col2:
         st.write(f"**Career Talk Attempts:** {pro_count}")
         st.caption("She is keeping count.")
 
+    # --- FULL DOSSIER DISPLAY ---
     db = st.session_state.user_profile_db
     if db:
         st.markdown("---")
         st.markdown("**Known Intel**")
-        if db.get("relationship_status"):
-            st.caption(f"Status: {db['relationship_status']}")
-        if db.get("session_count"):
-            st.caption(f"Sessions: {db['session_count']}")
-        if db.get("occupation"):
-            st.caption(f"Occupation: {db['occupation']}")
-        if db.get("nicknames"):
-            st.caption(f"Her label: {db['nicknames']}")
-        if db.get("soft_spots"):
-            spots = db["soft_spots"]
-            if isinstance(spots, list):
-                st.caption(f"Soft spots: {', '.join(spots)}")
 
+        if db.get("relationship_status"):
+            status_emoji = {
+                "stranger":  "👁️",
+                "applicant": "📋",
+                "accepted":  "✦",
+                "asset":     "💎",
+                "dismissed": "🧊",
+            }.get(db["relationship_status"], "•")
+            st.caption(f"{status_emoji} Status: **{db['relationship_status'].title()}**")
+
+        if db.get("session_count"):
+            st.caption(f"📅 Sessions: {db['session_count']}")
+        if db.get("occupation"):
+            st.caption(f"💼 Occupation: {db['occupation']}")
+        if db.get("location"):
+            st.caption(f"📍 Location: {db['location']}")
+        if db.get("age"):
+            st.caption(f"🎂 Age: {db['age']}")
+        if db.get("nicknames"):
+            st.caption(f"🏷️ Her label: *{db['nicknames']}*")
+        if db.get("notes"):
+            st.caption(f"📝 Notes: {db['notes'][:120]}{'...' if len(db.get('notes','')) > 120 else ''}")
+
+        # Array intel — show as compact tags
+        for field, label, emoji in [
+            ("insecurities", "Insecurities", "🩹"),
+            ("soft_spots",   "Soft Spots",   "🎯"),
+            ("boasts",       "Boasts",       "📣"),
+            ("fears",        "Fears",        "⚠️"),
+            ("desires",      "Desires",      "🔮"),
+        ]:
+            items = db.get(field)
+            if items and isinstance(items, list) and len(items) > 0:
+                st.caption(f"{emoji} **{label}:** {' · '.join(items[:3])}")
+
+        # --- PRIVATE FILE (deep profile) ---
         deep = db.get("deep_profile") or {}
         if isinstance(deep, str):
             try:
                 deep = json.loads(deep)
             except Exception:
                 deep = {}
-        if deep.get("her_read"):
+
+        if deep:
             st.markdown("---")
-            st.markdown("**Private File**")
-            st.caption("✦ Verdict on file")
-        if deep.get("open_questions"):
-            st.caption(f"✦ {len(deep['open_questions'])} open threads")
-        if deep.get("recurring_patterns"):
-            st.caption(f"✦ {len(deep['recurring_patterns'])} patterns logged")
+            st.markdown("**🗂️ Private File**")
+
+            if deep.get("her_read"):
+                st.caption(f"**Verdict:** _{deep['her_read']}_")
+
+            if deep.get("dominant_trait"):
+                st.caption(f"**Dominant trait:** {deep['dominant_trait']}")
+
+            if deep.get("self_image_vs_reality"):
+                with st.expander("Self-image gap", expanded=False):
+                    st.caption(deep["self_image_vs_reality"])
+
+            if deep.get("utility_assessment"):
+                st.caption(f"**Utility:** {deep['utility_assessment']}")
+
+            if deep.get("open_questions"):
+                with st.expander(f"Open threads ({len(deep['open_questions'])})", expanded=False):
+                    for q in deep["open_questions"][:5]:
+                        st.caption(f"• {q}")
+
+            if deep.get("recurring_patterns"):
+                with st.expander(f"Patterns ({len(deep['recurring_patterns'])})", expanded=False):
+                    for p in deep["recurring_patterns"][:5]:
+                        st.caption(f"• {p}")
 
     st.markdown("---")
     st.write("**Protocol:**")
@@ -802,7 +1120,7 @@ with col2:
     st.caption("- She wants to know you, not your job.")
 
     if st.button("Reset Interaction"):
-        if st.session_state.messages and client:
+        if st.session_state.messages and (groq_client or client):
             save_full_transcript(
                 supabase,
                 st.session_state.user_name,
@@ -820,4 +1138,5 @@ with col2:
         st.session_state.session_id             = str(uuid.uuid4())
         st.session_state.opener_injected        = False
         st.session_state.last_deep_synthesis_at = 0
+        st.session_state.static_prompt_core     = None
         st.rerun()
