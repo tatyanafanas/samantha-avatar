@@ -128,9 +128,13 @@ def speak_as_samantha(text: str) -> bytes | None:
                     chunk = json.loads(line)
                     audio_b64 += chunk.get("audioContent", "")
         return base64.b64decode(audio_b64) if audio_b64 else None
-    except Exception as e:
-        print(f"[TTS error] {e}")
-        return None
+    if st.session_state.voice_enabled:
+        with st.spinner(""):
+            audio_bytes = speak_as_samantha(reply)
+            if audio_bytes:
+                st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+            else:
+                st.warning("TTS returned nothing — check logs or API key")
 
 
 # ================================================================
