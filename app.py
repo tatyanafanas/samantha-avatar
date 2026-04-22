@@ -58,7 +58,10 @@ except Exception:
 def init_connections():
     try:
         # ── PRIMARY: Gemini 2.5 Pro via AI Studio (free) ──────────
-        gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+        try:
+           gemini_key = st.secrets["GEMINI_API_KEY"]
+        except KeyError:
+           gemini_key = ""
         if gemini_key:
             primary_client = OpenAI(
                 base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
