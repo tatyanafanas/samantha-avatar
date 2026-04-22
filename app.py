@@ -91,76 +91,50 @@ hf_client        = init_hf_client()
 # ================================================================
 
 def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
-    """
-    Call Inworld TTS. Returns (mp3_bytes_or_None, debug_message).
-    Debug message explains exactly what happened at each step.
-    """
-    # --- Guard: empty text ---
     if not text or not text.strip():
         return None, "TTS skipped: empty text"
 
-    # --- Guard: API key present ---
     api_key = st.secrets.get("INWORLD_API_KEY", "")
     if not api_key:
         return None, "TTS failed: INWORLD_API_KEY not found in secrets"
 
-    # --- Guard: truncate if needed ---
     if len(text) > 40000:
         text = text[:40000].rsplit('.', 1)[0] + '.'
 
-    url = "https://api.inworld.ai/tts/v1/voice:stream"
+    url = "https://api.inworld.ai/tts/v1/voice"  # ← non-streaming endpoint
     headers = {
         "Authorization": f"Basic {api_key}",
         "Content-Type": "application/json"
     }
     payload = {
         "text": text,
-        "voice_id": "default-2cyivjkeebcsrpaspvntwg__samantha",
-        "audio_config": {
-            "audio_encoding": "MP3",
-            "speaking_rate": 1.18
+        "voiceId": "default-2cyivjkeebcsrpaspvntwg__samantha",  # ← camelCase
+        "modelId": "inworld-tts-1.5-max",                        # ← camelCase
+        "audioConfig": {
+            "speakingRate": 1.18                                  # ← camelCase, no encoding needed
         },
         "temperature": 1.5,
-        "model_id": "inworld-tts-1.5-max"
     }
 
-    audio_b64   = ""
-    lines_seen  = 0
-    chunks_seen = 0
-
     try:
-        with requests.post(url, json=payload, headers=headers, stream=True, timeout=20) as r:
-            # --- Check HTTP status ---
-            if r.status_code != 200:
-                return None, f"TTS failed: HTTP {r.status_code} — {r.text[:200]}"
+        r = requests.post(url, json=payload, headers=headers, timeout=30)
 
-            for line in r.iter_lines(decode_unicode=True):
-                if not line:
-                    continue
-                lines_seen += 1
-                try:
-                    chunk = json.loads(line)
-                except json.JSONDecodeError as je:
-                    return None, f"TTS failed: JSON parse error on line {lines_seen}: {je} | raw: {line[:80]}"
+        if r.status_code != 200:
+            return None, f"TTS failed: HTTP {r.status_code} — {r.text[:200]}"
 
-                content = chunk.get("audioContent", "")
-                if content:
-                    audio_b64  += content
-                    chunks_seen += 1
+        result = r.json()
+        audio_b64 = result.get("audioContent", "")
 
-        # --- Guard: did we get any audio data? ---
         if not audio_b64:
-            return None, f"TTS failed: request succeeded ({lines_seen} lines) but audioContent was empty"
+            return None, f"TTS failed: audioContent missing. Keys: {list(result.keys())}"
 
         mp3_bytes = base64.b64decode(audio_b64)
-        return mp3_bytes, f"TTS OK: {chunks_seen} chunks, {len(mp3_bytes):,} bytes"
+        return mp3_bytes, f"TTS OK: {len(mp3_bytes):,} bytes"
 
     except requests.exceptions.Timeout:
-        return None, "TTS failed: request timed out after 20s"
-    except requests.exceptions.ConnectionError as ce:
-        return None, f"TTS failed: connection error — {ce}"
+        return None, "TTS failed: timed out after 30s"
     except Exception as e:
-        return None, f"TTS failed: unexpected error — {type(e).__name__}: {e}"
+        return None, f"TTS failed: {type(e).__name__}: {e}"
 
 
 def play_voice(text: str, location_label: str = ""):
