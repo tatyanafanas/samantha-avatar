@@ -562,6 +562,7 @@ EMOTIONAL_REALITY = {
         "True opinions — she mirrors just enough to maintain influence without exposing herself.",
         "Disinterest — even boredom is repurposed into observation and control.",
     ]
+}
 
 SITUATIONAL_RESPONSES = {
     "compliments_her": (
