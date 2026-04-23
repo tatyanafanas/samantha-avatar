@@ -105,59 +105,107 @@ client = gemini_client if gemini_client else groq_client
 
 
 # ================================================================
-# TTS — INWORLD VOICE
+# TTS — QWEN3 VIA NGROK CLOUD ENDPOINT
 # ================================================================
 
+# Text abbreviation map — expand before sending to TTS for natural prosody
+_ABBREV_MAP = {
+    r'\bShs\b':      'shillings',
+    r'\bUGX\b':      'ugandan shillings',
+    r'\bDr\.?\b':    'Doctor',
+    r'\bMaj\.?\b':   'Major',
+    r'\bRtd\.?\b':   'Retired',
+    r'\bCEO\b':      'C.E.O',
+    r'\bMD\b':       'Managing Director',
+    r'\bBSc\b':      'Bachelor of Science',
+    r'\bBA\b':       'Bachelor of Arts',
+    r'(\d+)k\b':     r'\1 thousand',
+    r'(\d+)[Mm]\b':  r'\1 million',
+    r'(\d+)[Bb]\b':  r'\1 billion',
+}
+
+def _preprocess_tts(text: str) -> str:
+    """Expand abbreviations and normalise punctuation for natural prosody."""
+    for pattern, replacement in _ABBREV_MAP.items():
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    text = text.replace('—', ', ').replace('–', ', ')
+    text = text.replace('...', '.').replace('…', '.')
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
 def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
+    """
+    Call the Qwen3 TTS server running on Colab and exposed via the ngrok
+    cloud endpoint set in st.secrets['TTS_ENDPOINT'].
+
+    Expected server contract:
+        POST /generate
+        Body:     { "text": "...", "chunk": true }
+        Response: { "audio_b64": "<base64 WAV>", "sample_rate": 22050 }
+
+    Returns (audio_bytes, debug_message).
+    """
     if not text or not text.strip():
         return None, "TTS skipped: empty text"
 
-    api_key = st.secrets.get("INWORLD_API_KEY", "")
-    if not api_key:
-        return None, "TTS failed: INWORLD_API_KEY not found in secrets"
+    tts_endpoint = st.secrets.get("TTS_ENDPOINT", "")
+    if not tts_endpoint:
+        return None, "TTS unavailable: TTS_ENDPOINT not set in secrets"
 
-    if len(text) > 40000:
-        text = text[:40000].rsplit('.', 1)[0] + '.'
+    processed = _preprocess_tts(text)
 
-    url = "https://api.inworld.ai/tts/v1/voice"
-    headers = {
-        "Authorization": f"Basic {api_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "text": text,
-        "voiceId": "default-p5baamankwny-tkzsydfpg__samantha",
-        "modelId": "inworld-tts-1.5-max",
-        "audioConfig": {
-            "speakingRate": 1.18
-        },
-        "temperature": 1.5,
-    }
+    # Cap length — very long replies can time out on T4
+    if len(processed) > 800:
+        processed = processed[:800].rsplit('.', 1)[0] + '.'
 
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=30)
-        if r.status_code != 200:
-            return None, f"TTS failed: HTTP {r.status_code} — {r.text[:200]}"
-        result = r.json()
-        audio_b64 = result.get("audioContent", "")
+        url  = f"{tts_endpoint.rstrip('/')}/generate"
+        resp = requests.post(
+            url,
+            json={"text": processed, "chunk": True},
+            timeout=60,
+        )
+
+        if resp.status_code != 200:
+            return None, f"TTS failed: HTTP {resp.status_code} — {resp.text[:200]}"
+
+        data      = resp.json()
+        audio_b64 = data.get("audio_b64", "")
+
         if not audio_b64:
-            return None, f"TTS failed: audioContent missing. Keys: {list(result.keys())}"
-        mp3_bytes = base64.b64decode(audio_b64)
-        return mp3_bytes, f"TTS OK: {len(mp3_bytes):,} bytes"
+            return None, f"TTS failed: audio_b64 missing. Keys: {list(data.keys())}"
+
+        audio_bytes = base64.b64decode(audio_b64)
+        return audio_bytes, f"TTS OK: {len(audio_bytes):,} bytes"
+
+    except requests.exceptions.ConnectionError:
+        return None, "TTS failed: could not reach endpoint. Is your Colab session running?"
     except requests.exceptions.Timeout:
-        return None, "TTS failed: timed out after 30s"
+        return None, "TTS failed: timed out after 60s"
     except Exception as e:
         return None, f"TTS failed: {type(e).__name__}: {e}"
 
 
 def play_voice(text: str, location_label: str = ""):
+    """Generate audio and render an autoplay HTML5 player inline."""
     audio_bytes, debug_msg = speak_as_samantha(text)
+
     if audio_bytes:
         b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
+        # WAV starts with RIFF header; otherwise assume MP3
+        mime_type = "audio/wav" if audio_bytes[:4] == b'RIFF' else "audio/mp3"
         audio_html = f"""
-        <audio autoplay controls style="width:100%; margin-top:4px;">
-            <source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">
-        </audio>
+        <div style="margin-top:6px;">
+            <audio autoplay controls style="
+                width: 100%;
+                height: 32px;
+                filter: invert(1) sepia(1) saturate(2) hue-rotate(5deg);
+                opacity: 0.85;
+            ">
+                <source src="data:{mime_type};base64,{b64_audio}" type="{mime_type}">
+            </audio>
+        </div>
         """
         st.markdown(audio_html, unsafe_allow_html=True)
         st.caption(f"🔊 {location_label} {debug_msg}")
@@ -229,16 +277,10 @@ HF_VISION_MODELS = [
 
 # ================================================================
 # CACHED STATIC PROMPT SECTIONS
-# These never change mid-session — build once, reuse every turn.
 # ================================================================
 
 @st.cache_data(show_spinner=False)
 def _build_static_prompt_core() -> str:
-    """
-    Renders the identity/lore/family/personal sections of the system prompt.
-    These are constant — no dynamic state involved.
-    Cached so they are not recomputed on every message.
-    """
     from engine.prompt_builder import (
         _render_family_block,
         _render_personal_world,
@@ -741,21 +783,14 @@ def _apply_extraction(extracted: dict):
 
 # ================================================================
 # CONTRADICTION DETECTOR
-# Checks current message against known profile facts.
-# Returns a hint string to inject into the prompt, or None.
 # ================================================================
 
 def detect_contradiction(text: str, profile_db: dict) -> str | None:
-    """
-    Compare the user's current message against stored profile facts.
-    Returns a short hint for the prompt if a contradiction is found.
-    """
     text_lower = text.lower()
     hints = []
 
     location = profile_db.get("location", "")
     if location:
-        # Look for city/country mentions that differ from stored location
         common_locations = [
             "london", "new york", "nairobi", "lagos", "dubai",
             "kampala", "accra", "johannesburg", "cape town", "paris",
@@ -771,7 +806,6 @@ def detect_contradiction(text: str, profile_db: dict) -> str | None:
 
     occupation = profile_db.get("occupation", "")
     if occupation:
-        # Detect if they claim a different role now
         role_keywords = ["i am a ", "i work as a ", "i'm a ", "my job is ", "i run a "]
         for kw in role_keywords:
             idx = text_lower.find(kw)
@@ -784,10 +818,8 @@ def detect_contradiction(text: str, profile_db: dict) -> str | None:
                     )
                 break
 
-    # Check age consistency
     age = profile_db.get("age", "")
     if age:
-        import re
         age_match = re.search(r"\b(i(?:'m| am) |aged? )(\d{2})\b", text_lower)
         if age_match:
             claimed_age = age_match.group(2)
@@ -879,9 +911,6 @@ with col1:
             last_extraction_category=st.session_state.last_extraction_category,
         )
 
-        # Merge: dynamic prompt already contains identity via build_system_prompt,
-        # but we append the cached static core's lore/family/personal sections
-        # as an addendum so the model always has full context without rebuilding.
         system_prompt = dynamic_prompt + f"""
 ---
 CURRENT STYLE: {current_style}
@@ -892,7 +921,6 @@ STYLE RULES:
 CURRENT OBJECTIVE: {st.session_state.profile['goal']}
 """
 
-        # ── Inject contradiction hint if found ─────────────────────
         if contradiction_hint:
             system_prompt += f"""
 ---
@@ -940,13 +968,13 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
             with st.chat_message("assistant"):
                 st.markdown(reply)
 
-            # --- VOICE ---
+            # ── VOICE ──────────────────────────────────────────────
             if st.session_state.voice_enabled:
                 play_voice(reply, "[reply]")
 
             msg_count = len(st.session_state.messages)
 
-            # ── Smarter memory trigger: every 6 messages OR high irritation ──
+            # Smarter memory trigger: every 6 messages OR high irritation
             should_update_memory = (
                 msg_count % 6 == 0
                 or st.session_state.profile["irritation"] > 0.7
@@ -969,23 +997,62 @@ with col2:
     st.markdown("### The Dossier")
 
     # --- VOICE TOGGLE ---
-    voice_on = st.session_state.voice_enabled
+    voice_on     = st.session_state.voice_enabled
+    tts_endpoint = st.secrets.get("TTS_ENDPOINT", "")
+    tts_available = bool(tts_endpoint)
 
-    if voice_on:
-        st.success("🔊 **Voice: ON** — She will speak.")
+    if tts_available:
+        if voice_on:
+            st.success("🔊 **Voice: ON** — She will speak.")
+        else:
+            st.info("🔇 **Voice: OFF** — Silent mode.")
+
+        toggle_val = st.toggle(
+            "Activate her voice",
+            value=voice_on,
+            key="voice_toggle",
+            help="Uses Qwen3 TTS via your ngrok endpoint. Make sure your Colab server is running."
+        )
+        if toggle_val != voice_on:
+            st.session_state.voice_enabled = toggle_val
+            st.rerun()
     else:
-        st.info("🔇 **Voice: OFF** — Silent mode.")
+        st.caption("_Voice unavailable. Add TTS_ENDPOINT to secrets to enable._")
 
-    toggle_val = st.toggle(
-        "Activate her voice",
-        value=voice_on,
-        key="voice_toggle",
-        help="Uses Inworld TTS. Toggle on, then send a message."
-    )
+    # --- TTS DIAGNOSTICS ---
+    with st.expander("🛠 TTS Diagnostics", expanded=False):
+        if tts_endpoint:
+            st.caption(f"✅ TTS_ENDPOINT found: `{tts_endpoint[:50]}...`")
+        else:
+            st.error("❌ TTS_ENDPOINT missing from secrets")
+            st.caption("Add `TTS_ENDPOINT = \"https://your-ngrok-url.ngrok-free.app\"` to Streamlit secrets.")
 
-    if toggle_val != voice_on:
-        st.session_state.voice_enabled = toggle_val
-        st.rerun()
+        if st.button("🔬 Test TTS now"):
+            test_text = "You came here for a reason. Let's find out what it is."
+            st.caption(f"Sending: _{test_text}_")
+            audio_bytes, debug_msg = speak_as_samantha(test_text)
+            if audio_bytes:
+                st.success(debug_msg)
+                play_voice(test_text, "[test]")
+            else:
+                st.error(debug_msg)
+                if "could not reach" in debug_msg:
+                    st.caption("💡 Make sure tts_server.py is running on Colab and the ngrok URL in secrets is current.")
+
+        if st.button("🩺 Check server health"):
+            if tts_endpoint:
+                try:
+                    r = requests.get(f"{tts_endpoint.rstrip('/')}/health", timeout=10)
+                    if r.status_code == 200:
+                        st.success(f"Server OK — {r.json()}")
+                    else:
+                        st.error(f"Server returned HTTP {r.status_code}")
+                except Exception as e:
+                    st.error(f"Could not reach server: {e}")
+                    st.caption("The ngrok cloud endpoint exists but nothing is forwarded to it yet. "
+                               "Run tts_server.py on Colab and connect the ngrok agent.")
+            else:
+                st.warning("No TTS_ENDPOINT configured.")
 
     # --- MODEL STATUS ---
     with st.expander("⚙️ Model Status", expanded=False):
@@ -997,33 +1064,8 @@ with col2:
             st.info("🔁 Groq fallback ready")
         if hf_client:
             st.info("🔁 HuggingFace last resort ready")
-        gemini_key = st.secrets.get("GEMINI_API_KEY", "")
-        if not gemini_key:
+        if not st.secrets.get("GEMINI_API_KEY", ""):
             st.caption("Add GEMINI_API_KEY to secrets to enable Gemini 2.5 Pro (free).")
-
-    # --- TTS DEBUG PANEL ---
-    with st.expander("🛠 TTS Diagnostics", expanded=False):
-        api_key = st.secrets.get("INWORLD_API_KEY", "")
-        if api_key:
-            st.caption(f"✅ INWORLD_API_KEY found — starts with: `{api_key[:8]}...`")
-        else:
-            st.error("❌ INWORLD_API_KEY missing from secrets")
-
-        if st.button("🔬 Test TTS now"):
-            test_text = "You came here for a reason. Let's find out what it is."
-            st.caption(f"Sending: _{test_text}_")
-            audio_bytes, debug_msg = speak_as_samantha(test_text)
-            if audio_bytes:
-                st.success(debug_msg)
-                b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
-                audio_html = f"""
-                <audio autoplay controls style="width:100%; margin-top:4px;">
-                    <source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">
-                </audio>
-                """
-                st.markdown(audio_html, unsafe_allow_html=True)
-            else:
-                st.error(debug_msg)
 
     st.markdown("---")
 
@@ -1070,7 +1112,6 @@ with col2:
         if db.get("notes"):
             st.caption(f"📝 Notes: {db['notes'][:120]}{'...' if len(db.get('notes','')) > 120 else ''}")
 
-        # Array intel — show as compact tags
         for field, label, emoji in [
             ("insecurities", "Insecurities", "🩹"),
             ("soft_spots",   "Soft Spots",   "🎯"),
@@ -1096,22 +1137,17 @@ with col2:
 
             if deep.get("her_read"):
                 st.caption(f"**Verdict:** _{deep['her_read']}_")
-
             if deep.get("dominant_trait"):
                 st.caption(f"**Dominant trait:** {deep['dominant_trait']}")
-
             if deep.get("self_image_vs_reality"):
                 with st.expander("Self-image gap", expanded=False):
                     st.caption(deep["self_image_vs_reality"])
-
             if deep.get("utility_assessment"):
                 st.caption(f"**Utility:** {deep['utility_assessment']}")
-
             if deep.get("open_questions"):
                 with st.expander(f"Open threads ({len(deep['open_questions'])})", expanded=False):
                     for q in deep["open_questions"][:5]:
                         st.caption(f"• {q}")
-
             if deep.get("recurring_patterns"):
                 with st.expander(f"Patterns ({len(deep['recurring_patterns'])})", expanded=False):
                     for p in deep["recurring_patterns"][:5]:
