@@ -1027,7 +1027,11 @@ with col2:
         if st.button("🩺 Check server health"):
             if tts_endpoint:
                 try:
-                    r = requests.get(f"{tts_endpoint.rstrip('/')}/health", timeout=10)
+                    r = requests.get(
+                        f"{tts_endpoint.rstrip('/')}/health",
+                        timeout=10,
+                        headers={"ngrok-skip-browser-warning": "true"},
+                    )
                     if r.status_code == 200:
                         st.success(f"Server OK — {r.json()}")
                     else:
