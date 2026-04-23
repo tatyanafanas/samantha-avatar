@@ -126,7 +126,7 @@ def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
     }
     payload = {
         "text": text,
-        "voiceId": "default-2cyivjkeebcsrpaspvntwg__samantha",
+        "voiceId": "default-p5baamankwny-tkzsydfpg__samantha",
         "modelId": "inworld-tts-1.5-max",
         "audioConfig": {
             "speakingRate": 1.18
