@@ -145,10 +145,14 @@ def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
     try:
         url  = f"{tts_endpoint.rstrip('/')}/generate"
         resp = requests.post(
-            url,
-            json={"text": processed, "chunk": True},
-            timeout=60,
-        )
+        url,
+        json={"text": processed, "chunk": True},
+        timeout=60,
+        headers={
+            "ngrok-skip-browser-warning": "true",
+            "Content-Type": "application/json",
+        },
+    )
 
         if resp.status_code != 200:
             return None, f"TTS failed: HTTP {resp.status_code} — {resp.text[:200]}"
