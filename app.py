@@ -148,7 +148,12 @@ def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
     """
     if not text or not text.strip():
         return None, "TTS skipped: empty text"
-
+        
+    if not resp.content or not resp.content.strip():
+        return None, "TTS failed: server returned empty response body"
+    
+    data = resp.json()
+    
     tts_endpoint = st.secrets.get("TTS_ENDPOINT", "")
     if not tts_endpoint:
         return None, "TTS unavailable: TTS_ENDPOINT not set in secrets"
