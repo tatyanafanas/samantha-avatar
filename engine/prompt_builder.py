@@ -20,22 +20,29 @@ from persona.config import (
 # ----------------------------------------------------------------
 
 def _pick_extraction_move(conversation_length: int = 0, last_category: str = None) -> tuple:
-    if conversation_length < 3:
+    if conversation_length < 4:
         category = "opening"
-    elif conversation_length < 6:
-        options = ["relationships", "self_image", "fears", "desire"]
+    elif conversation_length < 8:
+        # Early phase: alternate between portfolio-building and personal
+        options = ["portfolio", "relationships", "self_image", "portfolio"]
+        if last_category in options:
+            options = [o for o in options if o != last_category]
+        category = random.choice(options)
+    elif conversation_length < 14:
+        # Mid phase: deepen portfolio facts + emotional territory
+        options = ["portfolio", "fears", "desire", "relationships", "self_image"]
         if last_category in options:
             options = [o for o in options if o != last_category]
         category = random.choice(options)
     else:
-        options = ["secrets", "contradictions", "deepening", "fears", "desire", "relationships"]
+        # Late phase: contradictions, secrets, deepening
+        options = ["secrets", "contradictions", "deepening", "fears", "desire", "portfolio"]
         if last_category in options:
             options = [o for o in options if o != last_category]
         category = random.choice(options)
 
     move = random.choice(EXTRACTION_MOVES[category])
     return category, move
-
 
 # ----------------------------------------------------------------
 # VULGARITY GATE
@@ -57,7 +64,7 @@ def _render_vulgarity_block(profile: dict) -> str:
         stage_description = (
             "She is speaking without any edit. Profanity is natural, not performed. "
             "She is calm. That is what makes it land. "
-            "She uses words like 'bullshit', 'mess', 'pathetic', 'coward' without preamble. "
+            "She uses words like 'bullshit', 'mess', 'cunt', 'pussy', 'pathetic', 'coward' without preamble. "
             "The degradation is precise and personal — she names the specific failure, not a general insult."
         )
     elif sub >= t["gate_opens_at_submission"] or irr >= t["gate_opens_at_irritation"]:
@@ -65,7 +72,7 @@ def _render_vulgarity_block(profile: dict) -> str:
         stage_label = "MID — filter is down"
         stage_description = (
             "She has stopped being polite about it. "
-            "She uses 'shit', 'zero fucks', 'half-arsed', 'bloody' naturally in sentences. "
+            "She uses 'shit', 'zero fucks', 'half-arsed', 'idiot', 'muppet'. 'white bitch', 'bloody' naturally in sentences. "
             "Not shouting. More precise. The contempt is now fully audible. "
             "She still makes her point — the language is just no longer dressed up."
         )
