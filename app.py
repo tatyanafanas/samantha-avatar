@@ -57,11 +57,10 @@ except Exception:
 @st.cache_resource
 def init_connections():
     try:
-        # ── PRIMARY: Gemini 2.5 Pro via AI Studio (free) ──────────
         try:
-           gemini_key = st.secrets["GEMINI_API_KEY"]
+            gemini_key = st.secrets["GEMINI_API_KEY"]
         except KeyError:
-           gemini_key = ""
+            gemini_key = ""
         if gemini_key:
             primary_client = OpenAI(
                 base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
@@ -70,7 +69,6 @@ def init_connections():
         else:
             primary_client = None
 
-        # ── FALLBACK: Groq ─────────────────────────────────────────
         groq_client = OpenAI(
             base_url="https://api.groq.com/openai/v1",
             api_key=st.secrets["GROQ_API_KEY"]
@@ -100,7 +98,6 @@ def init_hf_client():
 gemini_client, groq_client, supabase = init_connections()
 hf_client = init_hf_client()
 
-# The client used for persona replies — prefer Gemini, fall back to Groq
 client = gemini_client if gemini_client else groq_client
 
 
@@ -108,7 +105,6 @@ client = gemini_client if gemini_client else groq_client
 # TTS — QWEN3 VIA NGROK CLOUD ENDPOINT
 # ================================================================
 
-# Text abbreviation map — expand before sending to TTS for natural prosody
 _ABBREV_MAP = {
     r'\bShs\b':      'shillings',
     r'\bUGX\b':      'ugandan shillings',
@@ -125,7 +121,6 @@ _ABBREV_MAP = {
 }
 
 def _preprocess_tts(text: str) -> str:
-    """Expand abbreviations and normalise punctuation for natural prosody."""
     for pattern, replacement in _ABBREV_MAP.items():
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
     text = text.replace('—', ', ').replace('–', ', ')
@@ -135,35 +130,15 @@ def _preprocess_tts(text: str) -> str:
 
 
 def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
-    """
-    Call the Qwen3 TTS server running on Colab and exposed via the ngrok
-    cloud endpoint set in st.secrets['TTS_ENDPOINT'].
-
-    Expected server contract:
-        POST /generate
-        Body:     { "text": "...", "chunk": true }
-        Response: { "audio_b64": "<base64 WAV>", "sample_rate": 22050 }
-
-    Returns (audio_bytes, debug_message).
-    """
     if not text or not text.strip():
         return None, "TTS skipped: empty text"
 
     tts_endpoint = st.secrets.get("TTS_ENDPOINT", "")
-    
-        
-    if not resp.content or not resp.content.strip():
-        return None, "TTS failed: server returned empty response body"
-    
-    data = resp.json()
-    
-    
     if not tts_endpoint:
         return None, "TTS unavailable: TTS_ENDPOINT not set in secrets"
 
     processed = _preprocess_tts(text)
 
-    # Cap length — very long replies can time out on T4
     if len(processed) > 800:
         processed = processed[:800].rsplit('.', 1)[0] + '.'
 
@@ -178,7 +153,15 @@ def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
         if resp.status_code != 200:
             return None, f"TTS failed: HTTP {resp.status_code} — {resp.text[:200]}"
 
-        data      = resp.json()
+        # Guard against empty body before attempting JSON parse
+        if not resp.content or not resp.content.strip():
+            return None, "TTS failed: server returned empty response body"
+
+        try:
+            data = resp.json()
+        except Exception:
+            return None, f"TTS failed: non-JSON response — {resp.text[:100]!r}"
+
         audio_b64 = data.get("audio_b64", "")
 
         if not audio_b64:
@@ -196,12 +179,14 @@ def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
 
 
 def play_voice(text: str, location_label: str = ""):
-    """Generate audio and render an autoplay HTML5 player inline."""
+    if not text or not text.strip():
+        st.caption(f"🔇 {location_label} Skipped: empty text")
+        return
+
     audio_bytes, debug_msg = speak_as_samantha(text)
 
     if audio_bytes:
         b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
-        # WAV starts with RIFF header; otherwise assume MP3
         mime_type = "audio/wav" if audio_bytes[:4] == b'RIFF' else "audio/mp3"
         audio_html = f"""
         <div style="margin-top:6px;">
@@ -225,7 +210,6 @@ def play_voice(text: str, location_label: str = ""):
 # MODEL LISTS
 # ================================================================
 
-# Gemini models — primary (free via AI Studio)
 GEMINI_TEXT_MODELS = [
     "gemini-2.5-pro-preview-05-06",
     "gemini-2.0-flash",
@@ -239,7 +223,6 @@ GEMINI_VISION_MODELS = [
     "gemini-1.5-pro",
 ]
 
-# Groq fallback — Maverick first for best persona adherence
 GROQ_TEXT_MODELS = [
     "meta-llama/llama-4-maverick-17b-128e-instruct",
     "meta-llama/llama-4-scout-17b-16e-instruct",
@@ -524,7 +507,6 @@ def _dedupe(lst: list) -> list:
 def call_with_fallback(system_prompt, clean_messages, has_image: bool = False):
     payload = [{"role": "system", "content": system_prompt}] + clean_messages
 
-    # ── 1. Try Gemini first (free, strongest) ─────────────────────
     if gemini_client:
         models = GEMINI_VISION_MODELS if has_image else GEMINI_TEXT_MODELS
         for model in models:
@@ -545,7 +527,6 @@ def call_with_fallback(system_prompt, clean_messages, has_image: bool = False):
                     print(f"[Gemini error] {model}: {e}")
                     continue
 
-    # ── 2. Fall back to Groq ───────────────────────────────────────
     if groq_client:
         if has_image:
             groq_order = _dedupe(GROQ_VISION_MODELS + GROQ_TEXT_MODELS)
@@ -570,7 +551,6 @@ def call_with_fallback(system_prompt, clean_messages, has_image: bool = False):
                     print(f"[Groq error] {model}: {e}")
                     continue
 
-    # ── 3. Last resort: HuggingFace ───────────────────────────────
     if hf_client:
         hf_order = HF_VISION_MODELS if has_image else HF_TEXT_MODELS
         for model in _dedupe(hf_order + HF_TEXT_MODELS):
@@ -699,7 +679,7 @@ Only include fields with clear evidence. Use null or [] for the rest.
         if not raw:
             return
 
-        json_start   = raw.find("\n{")
+        json_start = raw.find("\n{")
         if json_start == -1:
             json_start = raw.find("{")
 
@@ -894,7 +874,6 @@ with col1:
             if has_image:
                 st.image(uploaded_image, width=280)
 
-        # ── Contradiction detection ────────────────────────────────
         contradiction_hint = detect_contradiction(display_txt, st.session_state.user_profile_db)
 
         dossier = build_dossier_prompt(
@@ -907,7 +886,6 @@ with col1:
         st.session_state.last_style = current_style
         style_data    = STYLES[current_style]
 
-        # ── Build prompt: static core (cached) + dynamic sections ──
         if st.session_state.static_prompt_core is None:
             st.session_state.static_prompt_core = _build_static_prompt_core()
 
@@ -967,7 +945,6 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
                     system_prompt, clean_messages, has_image=has_image
                 )
 
-            # Show model badge only if not primary Gemini
             if not model_used.startswith("gemini/gemini-2.5"):
                 st.caption(f"_(fallback: {model_used})_")
 
@@ -976,13 +953,11 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
             with st.chat_message("assistant"):
                 st.markdown(reply)
 
-            # ── VOICE ──────────────────────────────────────────────
             if st.session_state.voice_enabled:
                 play_voice(reply, "[reply]")
 
             msg_count = len(st.session_state.messages)
 
-            # Smarter memory trigger: every 6 messages OR high irritation
             should_update_memory = (
                 msg_count % 6 == 0
                 or st.session_state.profile["irritation"] > 0.7
@@ -998,15 +973,14 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
 
 
 # ================================================================
-# RIGHT PANEL — RICHER DOSSIER DISPLAY
+# RIGHT PANEL
 # ================================================================
 
 with col2:
     st.markdown("### The Dossier")
 
-    # --- VOICE TOGGLE ---
-    voice_on     = st.session_state.voice_enabled
-    tts_endpoint = st.secrets.get("TTS_ENDPOINT", "")
+    voice_on      = st.session_state.voice_enabled
+    tts_endpoint  = st.secrets.get("TTS_ENDPOINT", "")
     tts_available = bool(tts_endpoint)
 
     if tts_available:
@@ -1027,7 +1001,6 @@ with col2:
     else:
         st.caption("_Voice unavailable. Add TTS_ENDPOINT to secrets to enable._")
 
-    # --- TTS DIAGNOSTICS ---
     with st.expander("🛠 TTS Diagnostics", expanded=False):
         if tts_endpoint:
             st.caption(f"✅ TTS_ENDPOINT found: `{tts_endpoint[:50]}...`")
@@ -1062,7 +1035,6 @@ with col2:
             else:
                 st.warning("No TTS_ENDPOINT configured.")
 
-    # --- MODEL STATUS ---
     with st.expander("⚙️ Model Status", expanded=False):
         if gemini_client:
             st.success("✅ Gemini 2.5 Pro — primary active")
@@ -1077,7 +1049,6 @@ with col2:
 
     st.markdown("---")
 
-    # --- LIVE STATE ---
     st.metric("Current Aura",      st.session_state.profile["mood"])
     st.metric("Current Objective", st.session_state.profile["goal"])
 
@@ -1091,7 +1062,6 @@ with col2:
         st.write(f"**Career Talk Attempts:** {pro_count}")
         st.caption("She is keeping count.")
 
-    # --- FULL DOSSIER DISPLAY ---
     db = st.session_state.user_profile_db
     if db:
         st.markdown("---")
@@ -1131,7 +1101,6 @@ with col2:
             if items and isinstance(items, list) and len(items) > 0:
                 st.caption(f"{emoji} **{label}:** {' · '.join(items[:3])}")
 
-        # --- PRIVATE FILE (deep profile) ---
         deep = db.get("deep_profile") or {}
         if isinstance(deep, str):
             try:
