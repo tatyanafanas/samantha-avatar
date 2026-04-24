@@ -147,7 +147,7 @@ def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
         resp = requests.post(
         url,
         json={"text": processed, "chunk": True},
-        timeout=60,
+        timeout=250,
         headers={
             "ngrok-skip-browser-warning": "true",
             "Content-Type": "application/json",
