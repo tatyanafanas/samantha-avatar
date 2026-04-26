@@ -13,6 +13,7 @@ import requests
 from persona.config import STYLES
 from engine.dynamics import analyze_interaction, update_goal
 from engine.prompt_builder import build_system_prompt
+from engine.style_selector import pick_style, explain_style_pick
 from engine.memory import (
     get_or_create_profile,
     get_conversation_history,
@@ -890,10 +891,15 @@ with col1:
            conversation_length=len(st.session_state.messages),
        )
 
-        available     = [s for s in list(STYLES.keys()) if s != st.session_state.last_style]
-        current_style = random.choice(available)
-        st.session_state.last_style = current_style
-        style_data    = STYLES[current_style]
+        current_style = pick_style(
+           last_user_message=prompt or "",
+           profile=st.session_state.profile,
+           profile_db=st.session_state.user_profile_db,
+           last_style=st.session_state.last_style,
+           conversation_length=len(st.session_state.messages),
+       )
+       st.session_state.last_style = current_style
+       style_data = STYLES[current_style]
 
         if st.session_state.static_prompt_core is None:
             st.session_state.static_prompt_core = _build_static_prompt_core()
@@ -1059,6 +1065,16 @@ with col2:
             st.info("🔁 HuggingFace last resort ready")
         if not st.secrets.get("GEMINI_API_KEY", ""):
             st.caption("Add GEMINI_API_KEY to secrets to enable Gemini 2.5 Pro (free).")
+        if st.session_state.messages and prompt:
+           with st.expander("🎭 Style Diagnostics", expanded=False):
+               explanation = explain_style_pick(
+                   last_user_message=prompt or "",
+                   profile=st.session_state.profile,
+                   profile_db=st.session_state.user_profile_db,
+                   conversation_length=len(st.session_state.messages),
+               )
+               st.caption(f"**Last style:** {st.session_state.last_style}")
+               st.caption(explanation)
 
     st.markdown("---")
 
