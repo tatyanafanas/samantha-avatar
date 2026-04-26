@@ -839,7 +839,11 @@ with col1:
     if not st.session_state.opener_injected and (gemini_client or groq_client):
         profile_db = st.session_state.user_profile_db
         if (profile_db.get("session_count") or 1) > 1:
-            dossier = build_dossier_prompt(profile_db, st.session_state.user_history_db)
+            dossier = build_dossier_prompt(
+               st.session_state.user_profile_db,
+               st.session_state.user_history_db,
+               conversation_length=len(st.session_state.messages),
+           )
             opener  = generate_opener(profile_db, dossier)
             if opener:
                 st.session_state.messages.append({"role": "assistant", "content": opener})
@@ -881,9 +885,10 @@ with col1:
         contradiction_hint = detect_contradiction(display_txt, st.session_state.user_profile_db)
 
         dossier = build_dossier_prompt(
-            st.session_state.user_profile_db,
-            st.session_state.user_history_db
-        )
+           st.session_state.user_profile_db,
+           st.session_state.user_history_db,
+           conversation_length=len(st.session_state.messages),
+       )
 
         available     = [s for s in list(STYLES.keys()) if s != st.session_state.last_style]
         current_style = random.choice(available)
