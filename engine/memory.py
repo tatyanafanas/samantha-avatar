@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timezone
+from engine.living_hooks import build_living_hooks
 
 
 SUMMARY_MODELS = [
@@ -370,24 +371,38 @@ Conversation (last 20 messages):
 # DOSSIER PROMPT BUILDER
 # ================================================================
 
-def build_dossier_prompt(profile: dict, history: str) -> str:
-    """Render the full dossier block for prompt injection."""
+def build_dossier_prompt(
+    profile: dict,
+    history: str,
+    conversation_length: int = 0,     # ← NEW PARAM (pass len(st.session_state.messages))
+) -> str:
+    """
+    Render the full dossier block for prompt injection.
+    Now includes living hooks — actionable present-tense observations
+    Samantha can deploy this turn — prominently, above the static facts.
+    """
+    from engine.living_hooks import build_living_hooks   # lazy import (safe)
+    import json
+ 
     status = profile.get("relationship_status", "stranger")
-
-    # deep_profile may be stored as a JSON string in Supabase
+ 
     deep = profile.get("deep_profile") or {}
     if isinstance(deep, str):
         try:
             deep = json.loads(deep)
         except Exception:
             deep = {}
-
+ 
+    # ── Living hooks (top of block — highest priority) ───────────
+    hooks_block = build_living_hooks(profile, conversation_length)
+ 
+    # ── Static dossier facts ─────────────────────────────────────
     lines = [
         f"USER DOSSIER — {profile.get('name', 'Unknown')}",
         f"Status: {status}",
         f"Sessions: {profile.get('session_count', 1)}",
     ]
-
+ 
     if profile.get("occupation"):
         lines.append(f"Occupation: {profile['occupation']}")
     if profile.get("location"):
@@ -407,8 +422,7 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
         lines.append(f"Boasts: {', '.join(b) if isinstance(b, list) else b}")
     if profile.get("notes"):
         lines.append(f"Notes: {profile['notes']}")
-
-    # Deep profile fields
+ 
     if deep:
         lines.append("")
         lines.append("PRIVATE FILE:")
@@ -424,8 +438,10 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
             lines.append(f"Open threads: {'; '.join(deep['open_questions'][:3])}")
         if deep.get("recurring_patterns"):
             lines.append(f"Patterns: {'; '.join(deep['recurring_patterns'][:3])}")
-
-    lines += [
+ 
+    static_block = "\n".join(lines)
+ 
+    lines_footer = [
         "",
         "PRIOR SESSIONS:",
         history,
@@ -437,4 +453,14 @@ def build_dossier_prompt(profile: dict, history: str) -> str:
         "- Do not announce what you remember. Let it surface naturally.",
         "- If status is 'stranger', they start from zero.",
     ]
-    return "\n".join(lines)
+    footer_block = "\n".join(lines_footer)
+ 
+    # ── Assemble: hooks first, then static facts, then history ──
+    parts = []
+    if hooks_block:
+        parts.append(hooks_block)
+        parts.append("")   # blank line separator
+    parts.append(static_block)
+    parts.append(footer_block)
+ 
+    return "\n".join(parts)
