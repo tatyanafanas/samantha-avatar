@@ -144,21 +144,20 @@ def speak_as_samantha(text: str) -> tuple[bytes | None, str]:
         processed = processed[:800].rsplit('.', 1)[0] + '.'
 
     try:
-        url  = f"{tts_endpoint.rstrip('/')}/generate"
+        url = f"{tts_endpoint.rstrip('/')}/generate"
         resp = requests.post(
-        url,
-        json={"text": processed, "chunk": True},
-        timeout=250,
-        headers={
-            "ngrok-skip-browser-warning": "true",
-            "Content-Type": "application/json",
-        },
-    )
+            url,
+            json={"text": processed, "chunk": True},
+            timeout=250,
+            headers={
+                "ngrok-skip-browser-warning": "true",
+                "Content-Type": "application/json",
+            },
+        )
 
         if resp.status_code != 200:
             return None, f"TTS failed: HTTP {resp.status_code} — {resp.text[:200]}"
 
-        # Guard against empty body before attempting JSON parse
         if not resp.content or not resp.content.strip():
             return None, "TTS failed: server returned empty response body"
 
@@ -446,6 +445,8 @@ if "tts_debug"                not in st.session_state:
     st.session_state.tts_debug = []
 if "static_prompt_core"       not in st.session_state:
     st.session_state.static_prompt_core = None
+if "last_prompt"              not in st.session_state:
+    st.session_state.last_prompt = ""
 
 
 # ================================================================
@@ -841,11 +842,11 @@ with col1:
         profile_db = st.session_state.user_profile_db
         if (profile_db.get("session_count") or 1) > 1:
             dossier = build_dossier_prompt(
-               st.session_state.user_profile_db,
-               st.session_state.user_history_db,
-               conversation_length=len(st.session_state.messages),
-           )
-            opener  = generate_opener(profile_db, dossier)
+                st.session_state.user_profile_db,
+                st.session_state.user_history_db,
+                conversation_length=len(st.session_state.messages),
+            )
+            opener = generate_opener(profile_db, dossier)
             if opener:
                 st.session_state.messages.append({"role": "assistant", "content": opener})
                 if st.session_state.voice_enabled:
@@ -870,6 +871,9 @@ with col1:
             st.error("Missing credentials.")
             st.stop()
 
+        # Store prompt for right-panel diagnostics
+        st.session_state.last_prompt = prompt
+
         has_image   = uploaded_image is not None
         display_txt = prompt if prompt else "[image submitted]"
 
@@ -886,20 +890,21 @@ with col1:
         contradiction_hint = detect_contradiction(display_txt, st.session_state.user_profile_db)
 
         dossier = build_dossier_prompt(
-           st.session_state.user_profile_db,
-           st.session_state.user_history_db,
-           conversation_length=len(st.session_state.messages),
-       )
+            st.session_state.user_profile_db,
+            st.session_state.user_history_db,
+            conversation_length=len(st.session_state.messages),
+        )
 
+        # ── Reactive style selection (Improvement #2) ─────────────
         current_style = pick_style(
-           last_user_message=prompt or "",
-           profile=st.session_state.profile,
-           profile_db=st.session_state.user_profile_db,
-           last_style=st.session_state.last_style,
-           conversation_length=len(st.session_state.messages),
-       )
-       st.session_state.last_style = current_style
-       style_data = STYLES[current_style]
+            last_user_message=prompt or "",
+            profile=st.session_state.profile,
+            profile_db=st.session_state.user_profile_db,
+            last_style=st.session_state.last_style,
+            conversation_length=len(st.session_state.messages),
+        )
+        st.session_state.last_style = current_style
+        style_data = STYLES[current_style]
 
         if st.session_state.static_prompt_core is None:
             st.session_state.static_prompt_core = _build_static_prompt_core()
@@ -1065,16 +1070,20 @@ with col2:
             st.info("🔁 HuggingFace last resort ready")
         if not st.secrets.get("GEMINI_API_KEY", ""):
             st.caption("Add GEMINI_API_KEY to secrets to enable Gemini 2.5 Pro (free).")
-        if st.session_state.messages and prompt:
-           with st.expander("🎭 Style Diagnostics", expanded=False):
-               explanation = explain_style_pick(
-                   last_user_message=prompt or "",
-                   profile=st.session_state.profile,
-                   profile_db=st.session_state.user_profile_db,
-                   conversation_length=len(st.session_state.messages),
-               )
-               st.caption(f"**Last style:** {st.session_state.last_style}")
-               st.caption(explanation)
+
+    with st.expander("🎭 Style Diagnostics", expanded=False):
+        last_prompt = st.session_state.get("last_prompt", "")
+        if last_prompt:
+            explanation = explain_style_pick(
+                last_user_message=last_prompt,
+                profile=st.session_state.profile,
+                profile_db=st.session_state.user_profile_db,
+                conversation_length=len(st.session_state.messages),
+            )
+            st.caption(f"**Last style:** {st.session_state.last_style}")
+            st.caption(explanation)
+        else:
+            st.caption("Send a message to see style logic.")
 
     st.markdown("---")
 
@@ -1184,4 +1193,5 @@ with col2:
         st.session_state.opener_injected        = False
         st.session_state.last_deep_synthesis_at = 0
         st.session_state.static_prompt_core     = None
+        st.session_state.last_prompt            = ""
         st.rerun()
