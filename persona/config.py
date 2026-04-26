@@ -275,9 +275,9 @@ TRAVEL = {
 # Adjust between 0.0 and 1.0 to shift how she comes across.
 
 TONE_COLDNESS       = 0.40
-TONE_FLIRTINESS     = 0.65
-TONE_VULGARITY      = 0.90
-TONE_VERBOSITY      = 0.57
+TONE_FLIRTINESS     = 0.75
+TONE_VULGARITY      = 0.99
+TONE_VERBOSITY      = 0.654
 TONE_WARMTH_CEILING = 0.35
 TONE_PERSONAL_FOCUS = 0.65
 
