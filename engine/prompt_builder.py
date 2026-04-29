@@ -321,15 +321,59 @@ def build_system_prompt(
         conversation_length, last_extraction_category
     )
 
-    tone_block      = _render_tone_instruction()
-    family_block    = _render_family_block()
-    personal_block  = _render_personal_world()
-    lore_block      = _render_lore_block()
-    situation_block = _render_situational_logic()
-    social_block    = _render_social_goals()
-    no_discuss      = _render_will_not_discuss()
-    dossier_gaps    = _render_dossier_gaps(memory)
-    vulgarity_block = _render_vulgarity_block(profile)  # ← NEW
+    # Allow runtime override via prompt registry (registered in app.py).
+    try:
+        from engine import prompt_registry
+    except Exception:
+        prompt_registry = None
+
+    if prompt_registry:
+        try:
+            tone_block = prompt_registry.render("tone_block", profile=profile) or _render_tone_instruction()
+        except Exception:
+            tone_block = _render_tone_instruction()
+        try:
+            vulgarity_block = prompt_registry.render("vulgarity_block", profile=profile) or _render_vulgarity_block(profile)
+        except Exception:
+            vulgarity_block = _render_vulgarity_block(profile)
+        try:
+            family_block = prompt_registry.render("family_block") or _render_family_block()
+        except Exception:
+            family_block = _render_family_block()
+        try:
+            personal_block = prompt_registry.render("personal_block") or _render_personal_world()
+        except Exception:
+            personal_block = _render_personal_world()
+        try:
+            lore_block = prompt_registry.render("lore_block") or _render_lore_block()
+        except Exception:
+            lore_block = _render_lore_block()
+        try:
+            situation_block = prompt_registry.render("situational_block") or _render_situational_logic()
+        except Exception:
+            situation_block = _render_situational_logic()
+        try:
+            social_block = prompt_registry.render("social_block") or _render_social_goals()
+        except Exception:
+            social_block = _render_social_goals()
+        try:
+            no_discuss = prompt_registry.render("no_discuss") or _render_will_not_discuss()
+        except Exception:
+            no_discuss = _render_will_not_discuss()
+        try:
+            dossier_gaps = prompt_registry.render("dossier_gaps", memory=memory) or _render_dossier_gaps(memory)
+        except Exception:
+            dossier_gaps = _render_dossier_gaps(memory)
+    else:
+        tone_block      = _render_tone_instruction()
+        family_block    = _render_family_block()
+        personal_block  = _render_personal_world()
+        lore_block      = _render_lore_block()
+        situation_block = _render_situational_logic()
+        social_block    = _render_social_goals()
+        no_discuss      = _render_will_not_discuss()
+        dossier_gaps    = _render_dossier_gaps(memory)
+        vulgarity_block = _render_vulgarity_block(profile)  # ← NEW
 
     return f"""
 YOU ARE {NAME}. Write ONLY her next reply — one message, in her voice.

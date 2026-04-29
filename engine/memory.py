@@ -3,6 +3,50 @@
 import json
 from datetime import datetime, timezone
 from engine.living_hooks import build_living_hooks
+import os
+import re
+from pathlib import Path
+
+
+# Local filesystem fallback for environments without Supabase
+LOCAL_DATA_DIR = Path("data")
+
+
+def _ensure_local_dirs():
+    (LOCAL_DATA_DIR / "profiles").mkdir(parents=True, exist_ok=True)
+    (LOCAL_DATA_DIR / "transcripts").mkdir(parents=True, exist_ok=True)
+    (LOCAL_DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
+
+
+def _profile_path(name: str) -> Path:
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", name.lower())
+    return LOCAL_DATA_DIR / "profiles" / f"{safe}.json"
+
+
+def _transcript_path(session_id: str) -> Path:
+    return LOCAL_DATA_DIR / "transcripts" / f"{session_id}.json"
+
+
+def _conversation_log_path(name: str) -> Path:
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", name.lower())
+    return LOCAL_DATA_DIR / "logs" / f"{safe}.log"
+
+
+def _read_json_file(path: Path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _write_json_file(path: Path, obj):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
 
 
 SUMMARY_MODELS = [
@@ -56,43 +100,62 @@ def _call_with_fallback(client, messages, temperature=0.3):
 
 def get_or_create_profile(supabase, name: str) -> dict:
     """Load existing profile or create a fresh one."""
-    try:
-        res = supabase.table("user_profiles") \
-            .select("*") \
-            .eq("name", name) \
-            .limit(1) \
-            .execute()
-        if res.data:
-            profile = res.data[0]
-            # Increment session count on each load
-            new_count = (profile.get("session_count") or 0) + 1
-            update_profile(supabase, name, {"session_count": new_count})
-            profile["session_count"] = new_count
-            return profile
-    except Exception:
-        pass
+    # Prefer Supabase when available, otherwise use local JSON store
+    if supabase:
+        try:
+            res = supabase.table("user_profiles") \
+                .select("*") \
+                .eq("name", name) \
+                .limit(1) \
+                .execute()
+            if res.data:
+                profile = res.data[0]
+                # Increment session count on each load
+                new_count = (profile.get("session_count") or 0) + 1
+                update_profile(supabase, name, {"session_count": new_count})
+                profile["session_count"] = new_count
+                return profile
+        except Exception:
+            pass
+
+    # Local fallback
+    _ensure_local_dirs()
+    path = _profile_path(name)
+    existing = _read_json_file(path) or {}
+    if existing:
+        new_count = (existing.get("session_count") or 0) + 1
+        existing["session_count"] = new_count
+        _write_json_file(path, existing)
+        return existing
 
     new_profile = {
         "name": name,
         "relationship_status": "stranger",
         "session_count": 1,
     }
-    try:
-        supabase.table("user_profiles").insert(new_profile).execute()
-    except Exception:
-        pass
+    _write_json_file(path, new_profile)
     return new_profile
 
 
 def update_profile(supabase, name: str, updates: dict):
     """Patch fields on an existing profile."""
-    try:
-        supabase.table("user_profiles") \
-            .update({**updates, "updated_at": datetime.now(timezone.utc).isoformat()}) \
-            .eq("name", name) \
-            .execute()
-    except Exception:
-        pass
+    timestamped = {**updates, "updated_at": datetime.now(timezone.utc).isoformat()}
+    if supabase:
+        try:
+            supabase.table("user_profiles") \
+                .update(timestamped) \
+                .eq("name", name) \
+                .execute()
+            return
+        except Exception:
+            pass
+
+    # Local fallback
+    _ensure_local_dirs()
+    path = _profile_path(name)
+    existing = _read_json_file(path) or {}
+    existing.update(timestamped)
+    _write_json_file(path, existing)
 
 
 def _append_note(existing_notes: str | None, new_note: str) -> str:
@@ -118,29 +181,62 @@ def _append_note(existing_notes: str | None, new_note: str) -> str:
 
 def get_conversation_history(supabase, name: str, limit: int = 3) -> str:
     """Fetch the last N session summaries for this user."""
+    if supabase:
+        try:
+            res = supabase.table("conversation_logs") \
+                .select("summary, created_at") \
+                .eq("user_name", name) \
+                .order("created_at", desc=True) \
+                .limit(limit) \
+                .execute()
+            if res.data:
+                entries = [f"[{r['created_at'][:10]}] {r['summary']}" for r in res.data]
+                return "\n---\n".join(entries)
+        except Exception:
+            pass
+
+    # Local fallback: read last `limit` JSON lines from a log file
+    _ensure_local_dirs()
+    path = _conversation_log_path(name)
+    if not path.exists():
+        return "No prior sessions."
     try:
-        res = supabase.table("conversation_logs") \
-            .select("summary, created_at") \
-            .eq("user_name", name) \
-            .order("created_at", desc=True) \
-            .limit(limit) \
-            .execute()
-        if res.data:
-            entries = [f"[{r['created_at'][:10]}] {r['summary']}" for r in res.data]
-            return "\n---\n".join(entries)
+        with open(path, "r", encoding="utf-8") as f:
+            lines = [l.strip() for l in f.readlines() if l.strip()]
+        entries = []
+        for line in lines[-limit:][::-1]:
+            try:
+                obj = json.loads(line)
+                ts = obj.get("created_at", "?")[:10]
+                entries.append(f"[{ts}] {obj.get('summary','')}")
+            except Exception:
+                entries.append(line[:160])
+        return "\n---\n".join(entries) if entries else "No prior sessions."
     except Exception:
-        pass
-    return "No prior sessions."
+        return "No prior sessions."
 
 
 def save_session_log(supabase, name: str, session_id: str, summary: str):
     """Append a session summary to conversation_logs."""
+    entry = {
+        "user_name": name,
+        "session_id": session_id,
+        "summary": summary,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if supabase:
+        try:
+            supabase.table("conversation_logs").insert(entry).execute()
+            return
+        except Exception:
+            pass
+
+    # Local fallback: append JSON line
+    _ensure_local_dirs()
+    path = _conversation_log_path(name)
     try:
-        supabase.table("conversation_logs").insert({
-            "user_name":  name,
-            "session_id": session_id,
-            "summary":    summary,
-        }).execute()
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
@@ -153,15 +249,31 @@ def save_full_transcript(supabase, name: str, session_id: str, messages: list):
     """
     if not messages:
         return
+    payload = {
+        "session_id": session_id,
+        "user_name": name,
+        "messages": messages,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if supabase:
+        try:
+            supabase.table("transcripts").upsert({
+                "session_id": session_id,
+                "user_name": name,
+                "messages": json.dumps(messages),
+                "updated_at": payload["updated_at"],
+            }, on_conflict="session_id").execute()
+            return
+        except Exception as e:
+            print(f"[save_full_transcript error - supabase] {e}")
+
+    # Local fallback: write full transcript to file
     try:
-        supabase.table("transcripts").upsert({
-            "session_id":   session_id,
-            "user_name":    name,
-            "messages":     json.dumps(messages),
-            "updated_at":   datetime.now(timezone.utc).isoformat(),
-        }, on_conflict="session_id").execute()
+        _ensure_local_dirs()
+        path = _transcript_path(session_id)
+        _write_json_file(path, payload)
     except Exception as e:
-        print(f"[save_full_transcript error] {e}")
+        print(f"[save_full_transcript error - local] {e}")
 
 
 # ================================================================
