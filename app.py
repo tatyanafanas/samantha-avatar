@@ -13,6 +13,9 @@ import requests
 from persona.config import STYLES
 from engine.dynamics import analyze_interaction, update_goal
 from engine.prompt_builder import build_system_prompt
+from engine import prompt_registry
+from engine import prompt_builder as _prompt_builder
+from engine import prompt_template
 from engine.style_selector import pick_style, explain_style_pick
 from engine.memory import (
     get_or_create_profile,
@@ -908,6 +911,36 @@ with col1:
 
         if st.session_state.static_prompt_core is None:
             st.session_state.static_prompt_core = _build_static_prompt_core()
+            try:
+                # Register the static core and the build function for centralized prompt management
+                prompt_registry.register("static_prompt_core", st.session_state.static_prompt_core)
+                prompt_registry.register("build_system_prompt", build_system_prompt)
+
+                # Register key prompt fragments as callables so they render with live context
+                prompt_registry.register("vulgarity_block", lambda profile=None, **kw: _prompt_builder._render_vulgarity_block(profile or {}))
+                prompt_registry.register("tone_block", lambda **kw: _prompt_builder._render_tone_instruction())
+                prompt_registry.register("family_block", lambda **kw: _prompt_builder._render_family_block())
+                prompt_registry.register("personal_block", lambda **kw: _prompt_builder._render_personal_world())
+                prompt_registry.register("lore_block", lambda **kw: _prompt_builder._render_lore_block())
+                prompt_registry.register("situational_block", lambda **kw: _prompt_builder._render_situational_logic())
+                prompt_registry.register("social_block", lambda **kw: _prompt_builder._render_social_goals())
+
+                # Example composite template that can be rendered with `prompt_template.render_template`
+                composite = """
+YOU ARE {name}. Speak in Samantha's voice.
+
+-- TONE --
+{{fragment:tone_block}}
+
+-- VULGARITY --
+{{fragment:vulgarity_block}}
+
+-- IDENTITY CORE --
+{{fragment:static_prompt_core}}
+""".strip()
+                prompt_registry.register("composite_example", lambda **ctx: prompt_template.render_template(composite, ctx))
+            except Exception:
+                pass
 
         dynamic_prompt = build_system_prompt(
             TRAITS,
