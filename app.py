@@ -462,9 +462,24 @@ if not st.session_state.user_name:
         placeholder="First name is sufficient."
     )
     if name_input:
-        st.session_state.user_name       = name_input.strip().title()
-        st.session_state.user_profile_db = get_or_create_profile(supabase, st.session_state.user_name)
-        st.session_state.user_history_db = get_conversation_history(supabase, st.session_state.user_name)
+        name = name_input.strip().title()
+        st.session_state.user_name       = name
+        profile = get_or_create_profile(supabase, name)
+        # One-time compression of bloated arrays for returning users
+        from engine.memory import compress_array, update_profile as _update_profile
+        COMPRESSIBLE = ["insecurities", "soft_spots", "boasts", "fears", "secrets", "desires", "self_image"]
+        compressed_updates = {}
+        for field in COMPRESSIBLE:
+            items = profile.get(field)
+            if isinstance(items, list) and len(items) > 10:
+                compressed = compress_array(gemini_client or groq_client, field, items)
+                if compressed and compressed != items:
+                    compressed_updates[field] = compressed
+                    profile[field] = compressed
+        if compressed_updates:
+            _update_profile(supabase, name, compressed_updates)
+        st.session_state.user_profile_db = profile
+        st.session_state.user_history_db = get_conversation_history(supabase, name)
         st.rerun()
     st.stop()
 
@@ -675,15 +690,29 @@ Schema: { "occupation": null, "location": null, "age": null,
 "notes": null }
 Only include fields with clear evidence. Use null or [] for the rest.
 """
-        fallback_client = groq_client or client
-        raw = mem_fallback(
-            fallback_client,
-            messages=[
-                {"role": "system", "content": combined_prompt},
-                {"role": "user",   "content": str(st.session_state.messages[-12:])}
-            ],
-            temperature=0.2
-        )
+        extraction_messages = [
+            {"role": "system", "content": combined_prompt},
+            {"role": "user",   "content": str(st.session_state.messages[-12:])}
+        ]
+
+        # Try Gemini first (higher free-tier limits), then Groq fallback
+        raw = None
+        if gemini_client:
+            for model in GEMINI_TEXT_MODELS:
+                try:
+                    resp = gemini_client.chat.completions.create(
+                        model=model, messages=extraction_messages, temperature=0.2
+                    )
+                    raw = resp.choices[0].message.content
+                    break
+                except Exception:
+                    continue
+        if not raw:
+            raw = mem_fallback(
+                groq_client or client,
+                messages=extraction_messages,
+                temperature=0.2
+            )
 
         if not raw:
             return
@@ -764,6 +793,11 @@ def _apply_extraction(extracted: dict):
                 if not is_duplicate:
                     merged.append(item)
             if merged != existing:
+                # Compress to 3-5 sharp insights when array grows unwieldy
+                if len(merged) > 10:
+                    from engine.memory import compress_array
+                    compressed = compress_array(gemini_client or groq_client, arr_field, merged)
+                    merged = compressed if compressed else merged
                 updates[arr_field] = merged
 
     new_note = extracted.get("notes")
@@ -1012,7 +1046,7 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
             msg_count = len(st.session_state.messages)
 
             should_update_memory = (
-                msg_count % 6 == 0
+                msg_count % 3 == 0
                 or st.session_state.profile["irritation"] > 0.7
             )
             if should_update_memory:
