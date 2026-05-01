@@ -480,6 +480,52 @@ Conversation (last 20 messages):
 
 
 # ================================================================
+# ARRAY COMPRESSION
+# ================================================================
+
+def compress_array(client, field_name: str, items: list) -> list:
+    """Synthesize a bloated observation array into 3-5 sharp, distinct insights."""
+    if not client or len(items) <= 8:
+        return items
+
+    prompt = f"""You are a ruthlessly concise intelligence analyst.
+You have {len(items)} raw observations about one person, category: {field_name}.
+Many are repetitive or minor.
+
+Synthesize them into exactly 3-5 key insights.
+Each insight: one sentence, sharp and specific, capturing the most actionable intelligence.
+Do not soften. Do not repeat.
+
+Return ONLY a JSON array of strings. No preamble, no markdown fences.
+
+Observations:
+{json.dumps(items, ensure_ascii=False)}"""
+
+    for model_attempt in ["gemini-2.0-flash", "gemini-1.5-flash"]:
+        try:
+            response = client.chat.completions.create(
+                model=model_attempt,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": "Synthesize now."}
+                ],
+                temperature=0.1,
+            )
+            raw = response.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            result = json.loads(raw.strip())
+            if isinstance(result, list) and result:
+                return result
+        except Exception:
+            continue
+
+    return items[-6:]
+
+
+# ================================================================
 # DOSSIER PROMPT BUILDER
 # ================================================================
 
