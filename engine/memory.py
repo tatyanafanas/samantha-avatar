@@ -1,11 +1,14 @@
 # engine/memory.py
 
 import json
+import logging
 from datetime import datetime, timezone
 from engine.living_hooks import build_living_hooks
 import os
 import re
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # Local filesystem fallback for environments without Supabase
@@ -115,8 +118,8 @@ def get_or_create_profile(supabase, name: str) -> dict:
                 update_profile(supabase, name, {"session_count": new_count})
                 profile["session_count"] = new_count
                 return profile
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[get_or_create_profile] Supabase error: %s", e)
 
     # Local fallback
     _ensure_local_dirs()
@@ -147,8 +150,8 @@ def update_profile(supabase, name: str, updates: dict):
                 .eq("name", name) \
                 .execute()
             return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[update_profile] Supabase error: %s", e)
 
     # Local fallback
     _ensure_local_dirs()
@@ -192,8 +195,8 @@ def get_conversation_history(supabase, name: str, limit: int = 3) -> str:
             if res.data:
                 entries = [f"[{r['created_at'][:10]}] {r['summary']}" for r in res.data]
                 return "\n---\n".join(entries)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[get_conversation_history] Supabase error: %s", e)
 
     # Local fallback: read last `limit` JSON lines from a log file
     _ensure_local_dirs()
@@ -228,8 +231,8 @@ def save_session_log(supabase, name: str, session_id: str, summary: str):
         try:
             supabase.table("conversation_logs").insert(entry).execute()
             return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[save_session_log] Supabase error: %s", e)
 
     # Local fallback: append JSON line
     _ensure_local_dirs()

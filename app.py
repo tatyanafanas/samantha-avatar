@@ -27,6 +27,7 @@ from engine.memory import (
     build_dossier_prompt,
     _call_with_fallback as mem_fallback,
 )
+from engine.memory_injection import build_memory_context, inject_memory_into_system_prompt
 from persona.config import (
     TONE_COLDNESS, TONE_FLIRTINESS, TONE_VULGARITY, TONE_VERBOSITY
 )
@@ -984,6 +985,13 @@ YOU ARE {name}. Speak in Samantha's voice.
             last_extraction_category=st.session_state.last_extraction_category,
         )
 
+        memory_ctx = build_memory_context(
+            st.session_state.user_profile_db,
+            st.session_state.user_history_db,
+            current_conversation_length=len(st.session_state.messages),
+        )
+        dynamic_prompt = inject_memory_into_system_prompt(dynamic_prompt, memory_ctx)
+
         system_prompt = dynamic_prompt + f"""
 ---
 CURRENT STYLE: {current_style}
@@ -1046,7 +1054,7 @@ Do not describe it mechanically. If unremarkable, treat it as unremarkable.
             msg_count = len(st.session_state.messages)
 
             should_update_memory = (
-                msg_count % 3 == 0
+                msg_count % 2 == 0
                 or st.session_state.profile["irritation"] > 0.7
             )
             if should_update_memory:
