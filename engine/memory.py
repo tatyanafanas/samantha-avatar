@@ -227,43 +227,47 @@ def save_session_log(supabase, user_name: str, session_id: str, summary: str):
     """
     if not supabase or not user_name or not summary:
         return
- 
-    try:
-        # Ensure the profile row exists first — if not, create a minimal one.
-        # This prevents the FK violation when a new user's profile hasn't
-        # been fully committed before the first log write fires.
-        check = supabase.table("user_profiles") \
-            .select("name") \
-            .eq("name", user_name) \
-            .limit(1) \
-            .execute()
- 
-        if not check.data:
-            supabase.table("user_profiles").upsert(
-                {"name": user_name, "session_count": 1},
-                on_conflict="name"
-            ).execute()
- 
-        # Now safe to insert the log
-        supabase.table("conversation_logs").insert({
-            "user_name":  user_name,
-            "session_id": session_id,
-            "summary":    summary,
-        }).execute()
-        # Local fallback: append JSON line
+
+    entry = {
+        "user_name": user_name,
+        "session_id": session_id,
+        "summary": summary,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if supabase:
+        try:
+            # Ensure the profile row exists first
+            check = supabase.table("user_profiles") \
+                .select("name") \
+                .eq("name", user_name) \
+                .limit(1) \
+                .execute()
+
+            if not check.data:
+                supabase.table("user_profiles").upsert(
+                    {"name": user_name, "session_count": 1},
+                    on_conflict="name"
+                ).execute()
+
+            # Now safe to insert the log
+            supabase.table("conversation_logs").insert({
+                "user_name":  user_name,
+                "session_id": session_id,
+                "summary":    summary,
+            }).execute()
+
+        except Exception as e:
+            print(f"[save_session_log] Supabase error: {e}")
+
+    # Local fallback: append JSON line
     _ensure_local_dirs()
-    path = _conversation_log_path(name)
+    path = _conversation_log_path(user_name)        # ← was: name (undefined)
     try:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
- 
     except Exception as e:
-        print(f"[save_session_log] Supabase error: {e}")
-
-    
-        pass
-
+        print(f"[save_session_log] Local fallback error: {e}"
 
 def save_full_transcript(supabase, name: str, session_id: str, messages: list):
     """
