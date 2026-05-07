@@ -267,7 +267,7 @@ def save_session_log(supabase, user_name: str, session_id: str, summary: str):
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:
-        print(f"[save_session_log] Local fallback error: {e}"
+        print(f"[save_session_log] Local fallback error: {e}")
 
 def save_full_transcript(supabase, name: str, session_id: str, messages: list):
     """
