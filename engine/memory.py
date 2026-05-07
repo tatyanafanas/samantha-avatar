@@ -219,28 +219,49 @@ def get_conversation_history(supabase, name: str, limit: int = 3) -> str:
         return "No prior sessions."
 
 
-def save_session_log(supabase, name: str, session_id: str, summary: str):
-    """Append a session summary to conversation_logs."""
-    entry = {
-        "user_name": name,
-        "session_id": session_id,
-        "summary": summary,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    if supabase:
-        try:
-            supabase.table("conversation_logs").insert(entry).execute()
-            return
-        except Exception as e:
-            logger.warning("[save_session_log] Supabase error: %s", e)
-
-    # Local fallback: append JSON line
+def save_session_log(supabase, user_name: str, session_id: str, summary: str):
+    """
+    Save a session summary to conversation_logs.
+    Guards against the FK violation by ensuring the user_profiles row
+    exists before attempting the insert.
+    """
+    if not supabase or not user_name or not summary:
+        return
+ 
+    try:
+        # Ensure the profile row exists first — if not, create a minimal one.
+        # This prevents the FK violation when a new user's profile hasn't
+        # been fully committed before the first log write fires.
+        check = supabase.table("user_profiles") \
+            .select("name") \
+            .eq("name", user_name) \
+            .limit(1) \
+            .execute()
+ 
+        if not check.data:
+            supabase.table("user_profiles").upsert(
+                {"name": user_name, "session_count": 1},
+                on_conflict="name"
+            ).execute()
+ 
+        # Now safe to insert the log
+        supabase.table("conversation_logs").insert({
+            "user_name":  user_name,
+            "session_id": session_id,
+            "summary":    summary,
+        }).execute()
+        # Local fallback: append JSON line
     _ensure_local_dirs()
     path = _conversation_log_path(name)
     try:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
+
+ 
+    except Exception as e:
+        print(f"[save_session_log] Supabase error: {e}")
+
+    
         pass
 
 
