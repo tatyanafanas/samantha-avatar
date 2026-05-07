@@ -31,6 +31,12 @@ from engine.memory_injection import build_memory_context, inject_memory_into_sys
 from persona.config import (
     TONE_COLDNESS, TONE_FLIRTINESS, TONE_VULGARITY, TONE_VERBOSITY
 )
+from engine.sisterhood import (
+    detect_sisterhood,
+    get_sisterhood_status,
+    SISTERHOOD_PROMPT_BLOCK
+)
+
 
 TRAITS = {
     "tone":  f"cold ({TONE_COLDNESS}), flirtatious ({TONE_FLIRTINESS}), vulgar ({TONE_VULGARITY})",
@@ -451,6 +457,8 @@ if "static_prompt_core"       not in st.session_state:
     st.session_state.static_prompt_core = None
 if "last_prompt"              not in st.session_state:
     st.session_state.last_prompt = ""
+if "sisterhood_active"        not in st.session_state:
+    st.session_state.sisterhood_active = False
 
 
 # ================================================================
@@ -696,7 +704,6 @@ Only include fields with clear evidence. Use null or [] for the rest.
             {"role": "user",   "content": str(st.session_state.messages[-12:])}
         ]
 
-        # Try Gemini first (higher free-tier limits), then Groq fallback
         raw = None
         if gemini_client:
             for model in GEMINI_TEXT_MODELS:
@@ -794,7 +801,6 @@ def _apply_extraction(extracted: dict):
                 if not is_duplicate:
                     merged.append(item)
             if merged != existing:
-                # Compress to 3-5 sharp insights when array grows unwieldy
                 if len(merged) > 10:
                     from engine.memory import compress_array
                     compressed = compress_array(gemini_client or groq_client, arr_field, merged)
@@ -909,7 +915,6 @@ with col1:
             st.error("Missing credentials.")
             st.stop()
 
-        # Store prompt for right-panel diagnostics
         st.session_state.last_prompt = prompt
 
         has_image   = uploaded_image is not None
@@ -933,7 +938,6 @@ with col1:
             conversation_length=len(st.session_state.messages),
         )
 
-        # ── Reactive style selection (Improvement #2) ─────────────
         current_style = pick_style(
             last_user_message=prompt or "",
             profile=st.session_state.profile,
@@ -947,11 +951,8 @@ with col1:
         if st.session_state.static_prompt_core is None:
             st.session_state.static_prompt_core = _build_static_prompt_core()
             try:
-                # Register the static core and the build function for centralized prompt management
                 prompt_registry.register("static_prompt_core", st.session_state.static_prompt_core)
                 prompt_registry.register("build_system_prompt", build_system_prompt)
-
-                # Register key prompt fragments as callables so they render with live context
                 prompt_registry.register("vulgarity_block", lambda profile=None, **kw: _prompt_builder._render_vulgarity_block(profile or {}))
                 prompt_registry.register("tone_block", lambda **kw: _prompt_builder._render_tone_instruction())
                 prompt_registry.register("family_block", lambda **kw: _prompt_builder._render_family_block())
@@ -959,8 +960,6 @@ with col1:
                 prompt_registry.register("lore_block", lambda **kw: _prompt_builder._render_lore_block())
                 prompt_registry.register("situational_block", lambda **kw: _prompt_builder._render_situational_logic())
                 prompt_registry.register("social_block", lambda **kw: _prompt_builder._render_social_goals())
-
-                # Example composite template that can be rendered with `prompt_template.render_template`
                 composite = """
 YOU ARE {name}. Speak in Samantha's voice.
 
@@ -1001,6 +1000,14 @@ STYLE RULES:
 
 CURRENT OBJECTIVE: {st.session_state.profile['goal']}
 """
+
+        # ── SISTERHOOD DETECTION & INJECTION ─────────────────────────
+        sisterhood_now = detect_sisterhood(st.session_state.messages)
+        if sisterhood_now != st.session_state.sisterhood_active:
+            st.session_state.sisterhood_active = sisterhood_now
+        if sisterhood_now:
+            system_prompt += f"\n---\n{SISTERHOOD_PROMPT_BLOCK}"
+        # ─────────────────────────────────────────────────────────────
 
         if contradiction_hint:
             system_prompt += f"""
@@ -1164,6 +1171,7 @@ with col2:
 
     st.metric("Current Aura",      st.session_state.profile["mood"])
     st.metric("Current Objective", st.session_state.profile["goal"])
+    st.metric("Peer Status",       get_sisterhood_status(st.session_state.messages))
 
     st.write("**Subject Submission**")
     st.progress(st.session_state.profile["submission"])
@@ -1269,4 +1277,5 @@ with col2:
         st.session_state.last_deep_synthesis_at = 0
         st.session_state.static_prompt_core     = None
         st.session_state.last_prompt            = ""
+        st.session_state.sisterhood_active      = False
         st.rerun()
