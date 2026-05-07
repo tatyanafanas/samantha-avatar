@@ -12,9 +12,7 @@ Two modes:
 import io
 import os
 import re
-import time
 import base64
-import hashlib
 import numpy as np
 import soundfile as sf
 
@@ -23,7 +21,6 @@ import soundfile as sf
 # Better punctuation → better prosody
 # ---------------------------------------------------------------------------
 
-# Ugandan currency / common abbreviations Samantha would say
 _ABBREV_MAP = {
     r'\bShs\b': 'shillings',
     r'\bUGX\b': 'ugandan shillings',
@@ -41,23 +38,20 @@ _ABBREV_MAP = {
     r'(\d+)[Bb]\b': r'\1 billion',
 }
 
+
 def preprocess_text(text: str) -> str:
     """
-    Clean and normalize text before TTS synthesis.
-    - Expand abbreviations
-    - Normalize punctuation for natural pausing
-    - Chunk-safe: strip trailing whitespace
+    Clean and normalise text before TTS synthesis.
+    - Expands abbreviations
+    - Normalises punctuation for natural pausing
     """
     for pattern, replacement in _ABBREV_MAP.items():
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
 
-    # Em-dash and ellipsis → pause-friendly punctuation
     text = text.replace('—', ', ')
     text = text.replace('–', ', ')
     text = text.replace('...', '.')
     text = text.replace('…', '.')
-
-    # Normalise multiple spaces / newlines
     text = re.sub(r'\s+', ' ', text).strip()
 
     return text
@@ -67,7 +61,6 @@ def chunk_text(text: str, max_chars: int = 200) -> list[str]:
     """
     Split text into sentence-level chunks for better TTS quality.
     Long single-pass generations drift — chunking keeps prosody tight.
-    Each chunk ends at a sentence boundary where possible.
     """
     sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
@@ -105,7 +98,7 @@ def concat_audio(chunks: list[tuple[np.ndarray, int]]) -> tuple[np.ndarray, int]
         return np.array([]), 22050
 
     sr = chunks[0][1]
-    silence = np.zeros(int(sr * 0.15))  # 150ms silence between chunks
+    silence = np.zeros(int(sr * 0.15))  # 150ms gap between chunks
 
     arrays = []
     for i, (audio, _) in enumerate(chunks):
@@ -125,6 +118,7 @@ def concat_audio(chunks: list[tuple[np.ndarray, int]]) -> tuple[np.ndarray, int]
 _local_model = None
 _local_model_config = {}
 
+
 def load_local_model(
     model_name: str = 'Qwen/Qwen2.5-Omni-7B',
     ref_audio_path: str = 'voice/samantha_ref.wav',
@@ -137,8 +131,7 @@ def load_local_model(
         return  # already loaded
 
     try:
-        # Import only if running locally — avoids import errors on CPU-only hosts
-        from qwen_tts import QwenTTS  # adjust to actual import path for your model
+        from qwen_tts import QwenTTS
         _local_model = QwenTTS.from_pretrained(model_name)
         _local_model_config = {
             'ref_audio': ref_audio_path,
@@ -176,9 +169,17 @@ def generate_local(text: str) -> tuple[np.ndarray, int] | None:
 
 
 # ---------------------------------------------------------------------------
-# REMOTE MODE — calls a FastAPI endpoint (recommended)
-# Deploy the model on Colab + ngrok or a GPU server, call it from Streamlit.
+# REMOTE MODE — calls a FastAPI endpoint (recommended for Streamlit Cloud)
 # ---------------------------------------------------------------------------
+
+# Headers required for every remote call.
+# ngrok-skip-browser-warning bypasses the ngrok interstitial page that
+# otherwise returns an HTML 404 instead of your API response.
+_REMOTE_HEADERS = {
+    "ngrok-skip-browser-warning": "true",
+    "Content-Type": "application/json",
+}
+
 
 def generate_remote(
     text: str,
@@ -186,7 +187,7 @@ def generate_remote(
     timeout: int = 60,
 ) -> tuple[np.ndarray, int] | None:
     """
-    Call a remote TTS API endpoint.
+    Call a remote TTS FastAPI endpoint.
 
     Expected endpoint: POST /generate
     Request body:  { "text": "...", "chunk": true }
@@ -195,53 +196,83 @@ def generate_remote(
     import requests
 
     processed = preprocess_text(text)
+    url = f"{endpoint_url.rstrip('/')}/generate"
 
     try:
         resp = requests.post(
-            f"{endpoint_url.rstrip('/')}/generate",
+            url,
             json={"text": processed, "chunk": True},
+            headers=_REMOTE_HEADERS,
             timeout=timeout,
         )
+
+        # Catch HTML error pages (ngrok interstitial, proxy errors, etc.)
+        content_type = resp.headers.get("Content-Type", "")
+        if "application/json" not in content_type:
+            preview = resp.text[:200].replace('\n', ' ')
+            print(f"[TTS Remote] Non-JSON response from {url} — '{preview}'")
+            return None
+
         resp.raise_for_status()
         data = resp.json()
 
-        audio_bytes = base64.b64decode(data['audio_b64'])
+        if "audio_b64" not in data:
+            print(f"[TTS Remote] Unexpected response shape: {list(data.keys())}")
+            return None
+
+        audio_bytes = base64.b64decode(data["audio_b64"])
         buffer = io.BytesIO(audio_bytes)
         audio, sr = sf.read(buffer)
         return audio, sr
 
+    except requests.exceptions.ConnectionError:
+        print(f"[TTS Remote] Could not reach endpoint: {url}")
+        print("[TTS Remote] Is your Colab server still running?")
+        return None
+    except requests.exceptions.Timeout:
+        print(f"[TTS Remote] Request timed out after {timeout}s — text may be too long")
+        return None
+    except requests.exceptions.HTTPError as e:
+        print(f"[TTS Remote] HTTP error: {e}")
+        return None
     except Exception as e:
-        print(f"[TTS Remote] Error: {e}")
+        print(f"[TTS Remote] Unexpected error: {e}")
         return None
 
 
 # ---------------------------------------------------------------------------
-# UNIFIED INTERFACE
-# Used by app.py — auto-selects local or remote based on config.
+# UNIFIED INTERFACE — used by app.py
 # ---------------------------------------------------------------------------
 
 def generate_speech(
     text: str,
-    mode: str = 'remote',         # 'local' or 'remote'
+    mode: str = 'remote',
     endpoint_url: str | None = None,
 ) -> str | None:
     """
-    Generate speech and return base64-encoded WAV string.
-    Returns None on failure (app continues without audio).
+    Generate speech and return a base64-encoded WAV string.
+    Returns None on any failure — app continues without audio.
 
     Args:
-        text:         The text to synthesize (Samantha's reply)
+        text:         The text to synthesise (Samantha's reply)
         mode:         'local' (GPU in-process) or 'remote' (API call)
         endpoint_url: Required for remote mode. Set via st.secrets['TTS_ENDPOINT'].
     """
+    if not text or not text.strip():
+        return None
+
     try:
         if mode == 'local':
             result = generate_local(text)
+
         elif mode == 'remote':
             if not endpoint_url:
+                print("[TTS] No endpoint URL configured — skipping TTS")
                 return None
             result = generate_remote(text, endpoint_url)
+
         else:
+            print(f"[TTS] Unknown mode '{mode}' — must be 'local' or 'remote'")
             return None
 
         if result is None:
