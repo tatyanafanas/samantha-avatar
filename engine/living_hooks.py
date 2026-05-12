@@ -174,6 +174,7 @@ def build_living_hooks(
     profile: dict,
     conversation_length: int = 0,
     max_hooks: int = 3,
+    recently_used: list = None,
 ) -> str:
     """
     Returns a formatted block of 2-3 actionable hooks for Samantha
@@ -183,6 +184,10 @@ def build_living_hooks(
         profile:             The user_profile dict from Supabase.
         conversation_length: Number of messages so far (affects hook selection).
         max_hooks:           Cap on hooks shown (default 3).
+        recently_used:       Mutable list of hook types used in recent turns.
+                             Updated in-place with the types selected this call.
+                             Hook types appearing here are penalised in scoring
+                             so the same hook doesn't fire every turn.
 
     Returns:
         A prompt-ready string block. Empty string if nothing is available.
@@ -192,7 +197,14 @@ def build_living_hooks(
     if not profile:
         return ""
 
-    candidates = []  # list of (score, hook_string)
+    # Scoring with recency penalty — hook types in recently_used[-12:] lose 4 pts
+    def _score(hook_type, value):
+        base = _score_hook(hook_type, value)
+        if recently_used and hook_type in recently_used[-12:]:
+            base -= 4
+        return base
+
+    candidates = []  # list of (score, hook_string, hook_type)
 
     name          = profile.get("name", "")
     session_count = profile.get("session_count", 1)
@@ -200,59 +212,59 @@ def build_living_hooks(
     # ── Returning user hook ──────────────────────────────────────
     if session_count and int(session_count) > 1 and name:
         candidates.append((
-            _score_hook("returning_user", session_count),
-            _hook_returning_user(int(session_count), name)
+            _score("returning_user", session_count),
+            _hook_returning_user(int(session_count), name),
+            "returning_user",
         ))
 
     # ── Name ────────────────────────────────────────────────────
     if name and conversation_length > 2:
-        candidates.append((_score_hook("name", name), _hook_name(name)))
+        candidates.append((_score("name", name), _hook_name(name), "name"))
 
     # ── Nickname ────────────────────────────────────────────────
     nickname = profile.get("nicknames", "")
     if nickname:
-        candidates.append((_score_hook("nickname", nickname), _hook_nickname(nickname)))
+        candidates.append((_score("nickname", nickname), _hook_nickname(nickname), "nickname"))
 
     # ── Occupation ──────────────────────────────────────────────
     occ = profile.get("occupation", "")
     if occ:
-        candidates.append((_score_hook("occupation", occ), _hook_occupation(occ)))
+        candidates.append((_score("occupation", occ), _hook_occupation(occ), "occupation"))
 
     # ── Location ────────────────────────────────────────────────
     loc = profile.get("location", "")
     if loc:
-        candidates.append((_score_hook("location", loc), _hook_location(loc)))
+        candidates.append((_score("location", loc), _hook_location(loc), "location"))
 
     # ── Age ─────────────────────────────────────────────────────
     age = profile.get("age", "")
     if age:
-        candidates.append((_score_hook("age", str(age)), _hook_age(str(age))))
+        candidates.append((_score("age", str(age)), _hook_age(str(age)), "age"))
 
     # ── Insecurities ────────────────────────────────────────────
     insecurities = profile.get("insecurities") or []
     if isinstance(insecurities, list) and insecurities:
-        # Pick the most recent / most charged one
         pick = insecurities[-1]
-        candidates.append((_score_hook("insecurity", pick), _hook_insecurity(pick)))
+        candidates.append((_score("insecurity", pick), _hook_insecurity(pick), "insecurity"))
 
     # ── Soft spots ──────────────────────────────────────────────
     soft_spots = profile.get("soft_spots") or []
     if isinstance(soft_spots, list) and soft_spots:
         pick = soft_spots[-1]
-        candidates.append((_score_hook("soft_spot", pick), _hook_soft_spot(pick)))
+        candidates.append((_score("soft_spot", pick), _hook_soft_spot(pick), "soft_spot"))
 
     # ── Boasts ──────────────────────────────────────────────────
     boasts = profile.get("boasts") or []
     if isinstance(boasts, list) and boasts:
         pick = boasts[-1]
-        candidates.append((_score_hook("boast", pick), _hook_boast(pick)))
+        candidates.append((_score("boast", pick), _hook_boast(pick), "boast"))
 
     # ── Notes ───────────────────────────────────────────────────
     notes = profile.get("notes", "")
     if notes:
         hook = _hook_notes(notes)
         if hook:
-            candidates.append((_score_hook("notes", notes), hook))
+            candidates.append((_score("notes", notes), hook, "notes"))
 
     # ── Deep profile fields ─────────────────────────────────────
     deep = profile.get("deep_profile") or {}
@@ -265,22 +277,21 @@ def build_living_hooks(
     if deep:
         verdict = deep.get("her_read", "")
         if verdict:
-            candidates.append((_score_hook("verdict", verdict), _hook_her_verdict(verdict)))
+            candidates.append((_score("verdict", verdict), _hook_her_verdict(verdict), "verdict"))
 
         trait = deep.get("dominant_trait", "")
         if trait:
-            candidates.append((_score_hook("deep_trait", trait), _hook_deep_trait(trait)))
+            candidates.append((_score("deep_trait", trait), _hook_deep_trait(trait), "deep_trait"))
 
         open_qs = deep.get("open_questions") or []
         if open_qs:
-            # Surface the most recent open thread
-            candidates.append((_score_hook("open_thread", open_qs[-1]), _hook_open_thread(open_qs[-1])))
+            candidates.append((_score("open_thread", open_qs[-1]), _hook_open_thread(open_qs[-1]), "open_thread"))
 
     # ── Live contradictions ──────────────────────────────────────
     contradictions = profile.get("contradictions") or []
     if isinstance(contradictions, list) and contradictions:
-        for c in contradictions[-2:]:  # surface up to 2 contradictions
-            candidates.append((_score_hook("contradiction", c), _hook_contradiction(c)))
+        for c in contradictions[-2:]:
+            candidates.append((_score("contradiction", c), _hook_contradiction(c), "contradiction"))
 
     # ── Nothing available ────────────────────────────────────────
     if not candidates:
@@ -288,7 +299,13 @@ def build_living_hooks(
 
     # Sort by score descending, take top N
     candidates.sort(key=lambda x: x[0], reverse=True)
-    selected = [hook for _, hook in candidates[:max_hooks]]
+    top = candidates[:max_hooks]
+    selected = [hook for _, hook, _ in top]
+
+    # Record which types fired so they're deprioritised next turn
+    if recently_used is not None:
+        recently_used.extend(t for _, _, t in top)
+        del recently_used[:-12]  # keep a rolling window of 12 entries (~4 turns)
 
     if not selected:
         return ""

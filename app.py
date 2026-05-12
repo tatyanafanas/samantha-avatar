@@ -20,6 +20,8 @@ from engine.style_selector import pick_style, explain_style_pick
 from engine.memory import (
     get_or_create_profile,
     get_conversation_history,
+    get_relevant_sessions,
+    update_key_facts,
     save_session_log,
     save_full_transcript,
     extract_and_update_profile,
@@ -459,6 +461,8 @@ if "last_prompt"              not in st.session_state:
     st.session_state.last_prompt = ""
 if "sisterhood_active"        not in st.session_state:
     st.session_state.sisterhood_active = False
+if "recent_hook_types"        not in st.session_state:
+    st.session_state.recent_hook_types = []
 
 
 # ================================================================
@@ -725,9 +729,8 @@ Only include fields with clear evidence. Use null or [] for the rest.
         if not raw:
             return
 
-        json_start = raw.find("\n{")
-        if json_start == -1:
-            json_start = raw.find("{")
+        json_match = re.search(r'(?m)^\{', raw)
+        json_start = json_match.start() if json_match else -1
 
         summary_text = raw[:json_start].strip() if json_start > 0 else raw.strip()
         json_text    = raw[json_start:].strip() if json_start > 0 else None
@@ -737,7 +740,8 @@ Only include fields with clear evidence. Use null or [] for the rest.
                 supabase,
                 st.session_state.user_name,
                 st.session_state.session_id,
-                summary_text
+                summary_text,
+                embed_client=groq_client,
             )
 
         save_full_transcript(
@@ -810,7 +814,7 @@ def _apply_extraction(extracted: dict):
     new_note = extracted.get("notes")
     if new_note:
         from engine.memory import _append_note
-        appended = _append_note(current.get("notes"), new_note)
+        appended = _append_note(current.get("notes"), new_note, client=groq_client or client)
         if appended:
             updates["notes"] = appended
 
@@ -889,6 +893,7 @@ with col1:
                 st.session_state.user_profile_db,
                 st.session_state.user_history_db,
                 conversation_length=len(st.session_state.messages),
+                recently_used=st.session_state.recent_hook_types,
             )
             opener = generate_opener(profile_db, dossier)
             if opener:
@@ -932,10 +937,17 @@ with col1:
 
         contradiction_hint = detect_contradiction(display_txt, st.session_state.user_profile_db)
 
+        relevant_history = get_relevant_sessions(
+            supabase,
+            st.session_state.user_name,
+            query_text=prompt or "",
+            embed_client=groq_client,
+        )
         dossier = build_dossier_prompt(
             st.session_state.user_profile_db,
-            st.session_state.user_history_db,
+            relevant_history,
             conversation_length=len(st.session_state.messages),
+            recently_used=st.session_state.recent_hook_types,
         )
 
         current_style = pick_style(
@@ -1264,7 +1276,10 @@ with col2:
                 st.session_state.session_id,
                 st.session_state.messages
             )
+            _run_memory_update()
             _run_deep_synthesis()
+            if (st.session_state.user_profile_db.get("session_count") or 1) >= 3:
+                update_key_facts(groq_client or client, supabase, st.session_state.user_name)
 
         st.session_state.messages               = []
         st.session_state.profile                = {
@@ -1278,4 +1293,5 @@ with col2:
         st.session_state.static_prompt_core     = None
         st.session_state.last_prompt            = ""
         st.session_state.sisterhood_active      = False
+        st.session_state.recent_hook_types      = []
         st.rerun()

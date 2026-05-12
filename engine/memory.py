@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 from datetime import datetime, timezone
 from engine.living_hooks import build_living_hooks
 import os
@@ -14,11 +15,56 @@ logger = logging.getLogger(__name__)
 # Local filesystem fallback for environments without Supabase
 LOCAL_DATA_DIR = Path("data")
 
+# Embedding model — Groq's free nomic embed (768-dim, already normalised)
+EMBED_MODEL = "nomic-embed-text-v1.5"
+
 
 def _ensure_local_dirs():
     (LOCAL_DATA_DIR / "profiles").mkdir(parents=True, exist_ok=True)
     (LOCAL_DATA_DIR / "transcripts").mkdir(parents=True, exist_ok=True)
     (LOCAL_DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
+    (LOCAL_DATA_DIR / "embeddings").mkdir(parents=True, exist_ok=True)
+
+
+# ================================================================
+# EMBEDDING UTILITIES
+# ================================================================
+
+def embed_text(client, text: str) -> list | None:
+    """Embed text via Groq's nomic model. Returns a float list or None."""
+    if not client or not text:
+        return None
+    try:
+        resp = client.embeddings.create(model=EMBED_MODEL, input=text[:2000])
+        return resp.data[0].embedding
+    except Exception as e:
+        logger.warning("[embed_text] %s", e)
+        return None
+
+
+def _embeddings_path(name: str) -> Path:
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", name.lower())
+    return LOCAL_DATA_DIR / "embeddings" / f"{safe}.json"
+
+
+def _load_local_embeddings(name: str) -> dict:
+    return _read_json_file(_embeddings_path(name)) or {}
+
+
+def _save_local_embedding(name: str, session_id: str, embedding: list):
+    _ensure_local_dirs()
+    path = _embeddings_path(name)
+    data = _load_local_embeddings(name)
+    data[session_id] = embedding
+    _write_json_file(path, data)
+
+
+def _cosine_sim(a: list, b: list) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    mag = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(x * x for x in b))
+    return dot / mag if mag else 0.0
 
 
 def _profile_path(name: str) -> Path:
@@ -161,18 +207,32 @@ def update_profile(supabase, name: str, updates: dict):
     _write_json_file(path, existing)
 
 
-def _append_note(existing_notes: str | None, new_note: str) -> str:
+def _append_note(existing_notes: str | None, new_note: str, client=None) -> str:
     """
     Append a new observation to the running notes field.
-    Keeps the last ~800 characters to avoid unbounded growth.
+    When the combined text exceeds 800 chars, uses an LLM synthesis pass
+    (if client is provided) rather than crudely truncating at a character boundary.
     """
     if not new_note:
         return existing_notes or ""
     combined = f"{existing_notes}\n{new_note}".strip() if existing_notes else new_note
-    # Trim to last 800 chars at a sentence boundary where possible
     if len(combined) > 800:
+        if client:
+            compressed = _call_with_fallback(
+                client,
+                messages=[
+                    {"role": "system", "content": (
+                        "Compress these analyst notes into 3-5 sharp sentences. "
+                        "Keep only the most psychologically significant observations. "
+                        "Plain text, no bullets, no markdown."
+                    )},
+                    {"role": "user", "content": combined},
+                ],
+                temperature=0.1,
+            )
+            if compressed:
+                return compressed.strip()
         trimmed = combined[-800:]
-        # Try to start at a sentence boundary
         dot = trimmed.find(". ")
         combined = trimmed[dot + 2:] if dot != -1 else trimmed
     return combined
@@ -219,14 +279,24 @@ def get_conversation_history(supabase, name: str, limit: int = 3) -> str:
         return "No prior sessions."
 
 
-def save_session_log(supabase, user_name: str, session_id: str, summary: str):
+def save_session_log(
+    supabase,
+    user_name: str,
+    session_id: str,
+    summary: str,
+    embed_client=None,
+):
     """
     Save a session summary to conversation_logs.
     Guards against the FK violation by ensuring the user_profiles row
     exists before attempting the insert.
+    When embed_client is provided, also stores the embedding locally for
+    semantic retrieval (avoids requiring a schema change in Supabase).
     """
-    if not supabase or not user_name or not summary:
+    if not user_name or not summary:
         return
+
+    embedding = embed_text(embed_client, summary) if embed_client else None
 
     entry = {
         "user_name": user_name,
@@ -237,7 +307,6 @@ def save_session_log(supabase, user_name: str, session_id: str, summary: str):
 
     if supabase:
         try:
-            # Ensure the profile row exists first
             check = supabase.table("user_profiles") \
                 .select("name") \
                 .eq("name", user_name) \
@@ -250,7 +319,6 @@ def save_session_log(supabase, user_name: str, session_id: str, summary: str):
                     on_conflict="name"
                 ).execute()
 
-            # Now safe to insert the log
             supabase.table("conversation_logs").insert({
                 "user_name":  user_name,
                 "session_id": session_id,
@@ -262,12 +330,15 @@ def save_session_log(supabase, user_name: str, session_id: str, summary: str):
 
     # Local fallback: append JSON line
     _ensure_local_dirs()
-    path = _conversation_log_path(user_name)        # ← was: name (undefined)
+    path = _conversation_log_path(user_name)
     try:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"[save_session_log] Local fallback error: {e}")
+
+    if embedding:
+        _save_local_embedding(user_name, session_id, embedding)
 
 def save_full_transcript(supabase, name: str, session_id: str, messages: list):
     """
@@ -369,22 +440,29 @@ Rules:
 
         new_note = extracted.get("notes")
         if new_note:
+            existing_notes = None
             try:
-                cur = supabase.table("user_profiles") \
-                    .select("notes").eq("name", name).limit(1).execute()
-                existing_notes = cur.data[0].get("notes") if cur.data else None
+                if supabase:
+                    cur = supabase.table("user_profiles") \
+                        .select("notes").eq("name", name).limit(1).execute()
+                    existing_notes = cur.data[0].get("notes") if cur.data else None
+                else:
+                    existing_notes = (_read_json_file(_profile_path(name)) or {}).get("notes")
             except Exception:
-                existing_notes = None
+                pass
             appended = _append_note(existing_notes, new_note)
             if appended:
                 updates["notes"] = appended
 
         # Array fields — append, deduplicate
         try:
-            cur = supabase.table("user_profiles") \
-                .select("insecurities, soft_spots, boasts") \
-                .eq("name", name).limit(1).execute()
-            existing = cur.data[0] if cur.data else {}
+            if supabase:
+                cur = supabase.table("user_profiles") \
+                    .select("insecurities, soft_spots, boasts") \
+                    .eq("name", name).limit(1).execute()
+                existing = cur.data[0] if cur.data else {}
+            else:
+                existing = _read_json_file(_profile_path(name)) or {}
         except Exception:
             existing = {}
 
@@ -554,13 +632,185 @@ Observations:
 
 
 # ================================================================
+# SEMANTIC SESSION RETRIEVAL
+# ================================================================
+
+def get_relevant_sessions(
+    supabase,
+    name: str,
+    query_text: str,
+    embed_client,
+    limit: int = 3,
+) -> str:
+    """
+    Return session summaries ranked by semantic similarity to query_text.
+    Falls back gracefully to recency-based order when embeddings are unavailable.
+
+    Embeddings are stored locally (data/embeddings/{name}.json) to avoid
+    requiring a schema change in Supabase.  Summaries are sourced from
+    Supabase when available, otherwise from the local log file.
+    """
+    query_emb = embed_text(embed_client, query_text) if (embed_client and query_text) else None
+    if not query_emb:
+        return get_conversation_history(supabase, name, limit)
+
+    sessions = []  # list of {summary, created_at, embedding}
+
+    if supabase:
+        try:
+            res = supabase.table("conversation_logs") \
+                .select("session_id, summary, created_at") \
+                .eq("user_name", name) \
+                .order("created_at", desc=True) \
+                .limit(50) \
+                .execute()
+            local_embs = _load_local_embeddings(name)
+            for r in (res.data or []):
+                sessions.append({
+                    "summary":    r.get("summary", ""),
+                    "created_at": r.get("created_at", ""),
+                    "embedding":  local_embs.get(r.get("session_id", "")),
+                })
+        except Exception as e:
+            logger.warning("[get_relevant_sessions] Supabase error: %s", e)
+
+    if not sessions:
+        _ensure_local_dirs()
+        path = _conversation_log_path(name)
+        local_embs = _load_local_embeddings(name)
+        if path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                            sid = obj.get("session_id", "")
+                            sessions.append({
+                                "summary":    obj.get("summary", ""),
+                                "created_at": obj.get("created_at", ""),
+                                "embedding":  local_embs.get(sid),
+                            })
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+    if not sessions:
+        return "No prior sessions."
+
+    scored = []
+    for i, s in enumerate(sessions):
+        if s.get("embedding"):
+            sim = _cosine_sim(query_emb, s["embedding"])
+        else:
+            sim = -i * 0.01  # recency proxy: more recent = less negative
+        scored.append((sim, s))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    entries = []
+    for _, s in scored[:limit]:
+        ts = s["created_at"][:10] if s.get("created_at") else "?"
+        entries.append(f"[{ts}] {s['summary']}")
+
+    return "\n---\n".join(entries) if entries else "No prior sessions."
+
+
+# ================================================================
+# KEY FACTS — EVERGREEN CROSS-SESSION SYNTHESIS
+# ================================================================
+
+def update_key_facts(client, supabase, name: str) -> str | None:
+    """
+    Synthesize all recorded session summaries into 5-8 stable, permanent facts
+    about the interlocutor.  Stored in profile["key_facts"] and refreshed on
+    every session end once at least 2 sessions exist.
+
+    Returns the new key_facts string, or None on failure.
+    """
+    all_summaries = []
+
+    if supabase:
+        try:
+            res = supabase.table("conversation_logs") \
+                .select("summary, created_at") \
+                .eq("user_name", name) \
+                .order("created_at", desc=True) \
+                .limit(50) \
+                .execute()
+            all_summaries = [r["summary"] for r in (res.data or []) if r.get("summary")]
+        except Exception:
+            pass
+
+    if not all_summaries:
+        _ensure_local_dirs()
+        path = _conversation_log_path(name)
+        if path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                s = json.loads(line).get("summary", "")
+                                if s:
+                                    all_summaries.append(s)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+    if len(all_summaries) < 2:
+        return None
+
+    existing_key_facts = (get_or_create_profile(supabase, name) or {}).get("key_facts", "")
+
+    synthesis_prompt = f"""You are a ruthlessly concise intelligence analyst.
+You have been watching {name} across multiple sessions.
+Synthesize 5-8 stable, permanent facts about this person.
+
+Include only what is persistently true: occupation, location, core relationships,
+dominant behavioural patterns, recurring psychological traits, how they respond to pressure.
+Skip single-session moods or transient topics.
+
+Write each fact as one sharp sentence. Plain text, one per line. No bullets.
+
+Existing facts (update but do not duplicate):
+{existing_key_facts or 'None yet.'}
+
+Session summaries (most recent first):
+{chr(10).join(all_summaries[:20])}
+"""
+
+    raw = _call_with_fallback(
+        client,
+        messages=[
+            {"role": "system", "content": synthesis_prompt},
+            {"role": "user",   "content": "Extract the permanent facts now."},
+        ],
+        temperature=0.2,
+    )
+
+    if raw:
+        key_facts = raw.strip()
+        update_profile(supabase, name, {"key_facts": key_facts})
+        return key_facts
+
+    return None
+
+
+# ================================================================
 # DOSSIER PROMPT BUILDER
 # ================================================================
 
 def build_dossier_prompt(
     profile: dict,
     history: str,
-    conversation_length: int = 0,     # ← NEW PARAM (pass len(st.session_state.messages))
+    conversation_length: int = 0,
+    recently_used: list = None,
 ) -> str:
     """
     Render the full dossier block for prompt injection.
@@ -569,18 +819,18 @@ def build_dossier_prompt(
     """
     from engine.living_hooks import build_living_hooks   # lazy import (safe)
     import json
- 
+
     status = profile.get("relationship_status", "stranger")
- 
+
     deep = profile.get("deep_profile") or {}
     if isinstance(deep, str):
         try:
             deep = json.loads(deep)
         except Exception:
             deep = {}
- 
+
     # ── Living hooks (top of block — highest priority) ───────────
-    hooks_block = build_living_hooks(profile, conversation_length)
+    hooks_block = build_living_hooks(profile, conversation_length, recently_used=recently_used)
  
     # ── Static dossier facts ─────────────────────────────────────
     lines = [
@@ -608,7 +858,15 @@ def build_dossier_prompt(
         lines.append(f"Boasts: {', '.join(b) if isinstance(b, list) else b}")
     if profile.get("notes"):
         lines.append(f"Notes: {profile['notes']}")
- 
+
+    if profile.get("key_facts"):
+        lines.append("")
+        lines.append("PERMANENT FILE (stable across all sessions):")
+        for fact in profile["key_facts"].strip().splitlines():
+            fact = fact.strip()
+            if fact:
+                lines.append(f"  {fact}")
+
     if deep:
         lines.append("")
         lines.append("PRIVATE FILE:")
