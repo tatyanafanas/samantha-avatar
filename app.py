@@ -1019,7 +1019,10 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
 """
 
         # ── GENDER TIER DETECTION & INJECTION ────────────────────────
-        gender_tier_now = detect_gender_tier(st.session_state.messages)
+        gender_tier_now = detect_gender_tier(
+            st.session_state.messages,
+            submission_score=float(st.session_state.profile.get("submission", 0.2)),
+        )
         st.session_state.gender_tier = gender_tier_now
         st.session_state.sisterhood_active = gender_tier_now in ("sisterhood", "rival")
         tier_block = get_tier_prompt_block(gender_tier_now)

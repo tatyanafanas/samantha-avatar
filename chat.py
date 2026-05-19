@@ -228,7 +228,10 @@ def main():
 
             try:
                 from engine.sisterhood import detect_gender_tier
-                gender_tier = detect_gender_tier(messages)
+                gender_tier = detect_gender_tier(
+                    messages,
+                    submission_score=profile_state.get("submission", 0.0),
+                )
             except Exception:
                 gender_tier = "none"
 
