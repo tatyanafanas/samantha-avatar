@@ -121,7 +121,7 @@ def _chat(client, models, system_prompt, messages):
 
 def _build_prompt(
     profile, history, profile_state, messages,
-    recently_used=None, sisterhood_active=False,
+    recently_used=None, gender_tier="none",
     supabase=None, embed_client=None,
 ):
     try:
@@ -150,7 +150,7 @@ def _build_prompt(
         profile_state,
         dossier,
         conversation_length=len(messages),
-        sisterhood_active=sisterhood_active,
+        gender_tier=gender_tier,
     )
 
 
@@ -227,15 +227,15 @@ def main():
             messages.append({"role": "user", "content": user_input})
 
             try:
-                from engine.sisterhood import detect_sisterhood
-                sisterhood_active = detect_sisterhood(messages)
+                from engine.sisterhood import detect_gender_tier
+                gender_tier = detect_gender_tier(messages)
             except Exception:
-                sisterhood_active = False
+                gender_tier = "none"
 
             system_prompt = _build_prompt(
                 profile, history, profile_state, messages,
                 recently_used=recently_used,
-                sisterhood_active=sisterhood_active,
+                gender_tier=gender_tier,
                 supabase=supabase,
                 embed_client=groq,  # groq hosts the nomic embedding model
             )

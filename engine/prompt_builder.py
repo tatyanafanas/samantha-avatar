@@ -316,7 +316,8 @@ def build_system_prompt(
     memory,
     conversation_length: int = 0,
     last_extraction_category: str = None,
-    sisterhood_active: bool = False,
+    sisterhood_active: bool = False,   # legacy compat
+    gender_tier: str = "none",
 ):
     extraction_category, extraction_hint = _pick_extraction_move(
         conversation_length, last_extraction_category
@@ -377,10 +378,18 @@ def build_system_prompt(
         vulgarity_block = _render_vulgarity_block(profile)
 
     try:
-        from engine.sisterhood import SISTERHOOD_PROMPT_BLOCK
-        sisterhood_block = SISTERHOOD_PROMPT_BLOCK if sisterhood_active else ""
+        from engine.sisterhood import get_tier_prompt_block, pick_tier_extraction_move, TIER_NONE
+        # Resolve tier: honour legacy bool flag for callers that haven't upgraded
+        resolved_tier = gender_tier if gender_tier != TIER_NONE else (
+            "sisterhood" if sisterhood_active else TIER_NONE
+        )
+        gender_block = get_tier_prompt_block(resolved_tier)
+        # Tier-specific extraction move overrides the standard one when tier is active
+        tier_move = pick_tier_extraction_move(resolved_tier)
     except Exception:
-        sisterhood_block = ""
+        gender_block = ""
+        resolved_tier = "none"
+        tier_move = None
 
     return f"""
 YOU ARE {NAME}. Write ONLY her next reply — one message, in her voice.
@@ -397,7 +406,7 @@ Age: {AGE} | Location: {LOCATION} | Archetype: {ARCHETYPE}
 Philosophy: {PHILOSOPHY}
 Origin: {ORIGIN_STORY}
 Heritage: {HERITAGE}
-{sisterhood_block}
+{gender_block}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 WHO SHE IS TALKING TO RIGHT NOW
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -539,8 +548,8 @@ She speaks in conclusions. She assumes compliance. Resistance is treated as a co
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXTRACTION MOVE — THIS TURN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Category: {extraction_category}
-Available: "{extraction_hint}"
+{"TIER-SPECIFIC MOVE (use this first — it fits the person better than the standard one):" + chr(10) + tier_move + chr(10) + chr(10) if tier_move else ""}Category: {extraction_category}
+Standard available: "{extraction_hint}"
 
 Use this only if the conversation has earned it and it fits naturally.
 A good follow-up on what they just said beats any prepared move.

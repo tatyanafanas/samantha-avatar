@@ -34,9 +34,12 @@ from persona.config import (
     TONE_COLDNESS, TONE_FLIRTINESS, TONE_VULGARITY, TONE_VERBOSITY
 )
 from engine.sisterhood import (
+    detect_gender_tier,
+    get_tier_status,
+    get_tier_prompt_block,
+    # backward-compat aliases kept for any external callers
     detect_sisterhood,
     get_sisterhood_status,
-    SISTERHOOD_PROMPT_BLOCK
 )
 
 
@@ -461,6 +464,8 @@ if "last_prompt"              not in st.session_state:
     st.session_state.last_prompt = ""
 if "sisterhood_active"        not in st.session_state:
     st.session_state.sisterhood_active = False
+if "gender_tier"              not in st.session_state:
+    st.session_state.gender_tier = "none"
 if "recent_hook_types"        not in st.session_state:
     st.session_state.recent_hook_types = []
 
@@ -1013,12 +1018,13 @@ STYLE RULES:
 CURRENT OBJECTIVE: {st.session_state.profile['goal']}
 """
 
-        # ── SISTERHOOD DETECTION & INJECTION ─────────────────────────
-        sisterhood_now = detect_sisterhood(st.session_state.messages)
-        if sisterhood_now != st.session_state.sisterhood_active:
-            st.session_state.sisterhood_active = sisterhood_now
-        if sisterhood_now:
-            system_prompt += f"\n---\n{SISTERHOOD_PROMPT_BLOCK}"
+        # ── GENDER TIER DETECTION & INJECTION ────────────────────────
+        gender_tier_now = detect_gender_tier(st.session_state.messages)
+        st.session_state.gender_tier = gender_tier_now
+        st.session_state.sisterhood_active = gender_tier_now in ("sisterhood", "rival")
+        tier_block = get_tier_prompt_block(gender_tier_now)
+        if tier_block:
+            system_prompt += f"\n---\n{tier_block}"
         # ─────────────────────────────────────────────────────────────
 
         if contradiction_hint:
@@ -1183,7 +1189,7 @@ with col2:
 
     st.metric("Current Aura",      st.session_state.profile["mood"])
     st.metric("Current Objective", st.session_state.profile["goal"])
-    st.metric("Peer Status",       get_sisterhood_status(st.session_state.messages))
+    st.metric("Peer Status",       get_tier_status(st.session_state.messages))
 
     st.write("**Subject Submission**")
     st.progress(st.session_state.profile["submission"])
@@ -1293,5 +1299,6 @@ with col2:
         st.session_state.static_prompt_core     = None
         st.session_state.last_prompt            = ""
         st.session_state.sisterhood_active      = False
+        st.session_state.gender_tier            = "none"
         st.session_state.recent_hook_types      = []
         st.rerun()
