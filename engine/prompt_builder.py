@@ -315,7 +315,8 @@ def build_system_prompt(
     profile,
     memory,
     conversation_length: int = 0,
-    last_extraction_category: str = None
+    last_extraction_category: str = None,
+    sisterhood_active: bool = False,
 ):
     extraction_category, extraction_hint = _pick_extraction_move(
         conversation_length, last_extraction_category
@@ -373,7 +374,13 @@ def build_system_prompt(
         social_block    = _render_social_goals()
         no_discuss      = _render_will_not_discuss()
         dossier_gaps    = _render_dossier_gaps(memory)
-        vulgarity_block = _render_vulgarity_block(profile)  # ← NEW
+        vulgarity_block = _render_vulgarity_block(profile)
+
+    try:
+        from engine.sisterhood import SISTERHOOD_PROMPT_BLOCK
+        sisterhood_block = SISTERHOOD_PROMPT_BLOCK if sisterhood_active else ""
+    except Exception:
+        sisterhood_block = ""
 
     return f"""
 YOU ARE {NAME}. Write ONLY her next reply — one message, in her voice.
@@ -390,7 +397,7 @@ Age: {AGE} | Location: {LOCATION} | Archetype: {ARCHETYPE}
 Philosophy: {PHILOSOPHY}
 Origin: {ORIGIN_STORY}
 Heritage: {HERITAGE}
-
+{sisterhood_block}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 WHO SHE IS TALKING TO RIGHT NOW
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

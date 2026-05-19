@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import uuid
 
 # ── Load .env if present ─────────────────────────────────────────
@@ -42,6 +43,7 @@ from openai import OpenAI
 
 from engine.prompt_builder import build_system_prompt
 from engine.dynamics import analyze_interaction, update_goal
+from engine.memory import SUMMARY_MODELS
 
 TRAITS = {
     "tone": "cold, flirtatious, precise",
@@ -53,14 +55,6 @@ TRAITS = {
         "Plant one seed of doubt per conversation — never resolve it",
     ],
 }
-
-SUMMARY_MODELS = [
-    "llama-3.3-70b-versatile",
-    "llama-4-scout-17b-16e-instruct",
-    "gemma2-9b-it",
-    "llama3-8b-8192",
-    "llama-3.1-8b-instant",
-]
 
 GEMINI_MODELS = [
     "gemini-2.5-flash-preview-05-20",
@@ -125,13 +119,28 @@ def _chat(client, models, system_prompt, messages):
     return None
 
 
-def _build_prompt(profile, history, profile_state, messages):
+def _build_prompt(
+    profile, history, profile_state, messages,
+    recently_used=None, sisterhood_active=False,
+    supabase=None, embed_client=None,
+):
     try:
-        from engine.memory import build_dossier_prompt
+        from engine.memory import build_dossier_prompt, get_relevant_sessions
+        # Use semantic retrieval when possible — last user message is the query
+        if embed_client and messages:
+            last_user = next(
+                (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
+            )
+            resolved_history = get_relevant_sessions(
+                supabase, profile.get("name", ""), last_user, embed_client
+            )
+        else:
+            resolved_history = history
         dossier = build_dossier_prompt(
             profile,
-            history,
+            resolved_history,
             conversation_length=len(messages),
+            recently_used=recently_used,
         )
     except Exception:
         dossier = f"User: {profile.get('name', 'unknown')}"
@@ -141,6 +150,7 @@ def _build_prompt(profile, history, profile_state, messages):
         profile_state,
         dossier,
         conversation_length=len(messages),
+        sisterhood_active=sisterhood_active,
     )
 
 
@@ -179,15 +189,17 @@ def main():
     except Exception:
         profile = {"name": name, "relationship_status": "stranger", "session_count": 1}
 
+    # Seed dynamics from last session's saved state if available, else use defaults
     profile_state = {
-        "submission": 0.2,
-        "irritation": 0.1,
-        "mood": "Coronated",
+        "submission": float(profile.get("last_submission", 0.2)),
+        "irritation": float(profile.get("last_irritation", 0.1)),
+        "mood": profile.get("last_mood", "Coronated"),
         "goal": "learn_them",
         "_professional_count": 0,
     }
 
     messages = []
+    recently_used = []  # rolling window for hook anti-repetition
 
     print(f"\n{'─'*55}")
     print(f"  Samantha Tushabe Okullo")
@@ -214,7 +226,19 @@ def main():
 
             messages.append({"role": "user", "content": user_input})
 
-            system_prompt = _build_prompt(profile, history, profile_state, messages)
+            try:
+                from engine.sisterhood import detect_sisterhood
+                sisterhood_active = detect_sisterhood(messages)
+            except Exception:
+                sisterhood_active = False
+
+            system_prompt = _build_prompt(
+                profile, history, profile_state, messages,
+                recently_used=recently_used,
+                sisterhood_active=sisterhood_active,
+                supabase=supabase,
+                embed_client=groq,  # groq hosts the nomic embedding model
+            )
 
             reply = _chat(primary, primary_models, system_prompt, messages)
             if not reply and groq and primary is not groq:
@@ -225,9 +249,28 @@ def main():
             messages.append({"role": "assistant", "content": reply})
             print(f"\nSamantha: {reply}\n")
 
-            # Background memory update every 2 exchanges
+            # Background memory update every 2 exchanges — run in a thread so it never blocks
             if len(messages) % 4 == 0:
-                _background_extract(groq or primary, supabase, name, session_id, messages)
+                t = threading.Thread(
+                    target=_background_extract,
+                    args=(groq or primary, supabase, name, session_id, list(messages)),
+                    daemon=True,
+                )
+                t.start()
+
+            # Deep profile synthesis every 10 exchanges
+            if len(messages) % 20 == 0:
+                def _run_deep_profile(client, sb, n, msgs, cur_profile):
+                    try:
+                        from engine.memory import synthesise_deep_profile
+                        synthesise_deep_profile(client, sb, n, msgs, cur_profile)
+                    except Exception:
+                        pass
+                threading.Thread(
+                    target=_run_deep_profile,
+                    args=(groq or primary, supabase, name, list(messages), dict(profile)),
+                    daemon=True,
+                ).start()
 
     except KeyboardInterrupt:
         pass
@@ -237,6 +280,23 @@ def main():
 
     # Final save
     _background_extract(groq or primary, supabase, name, session_id, messages)
+
+    # Persist live dynamics so the next session seeds from them
+    try:
+        from engine.memory import update_profile
+        update_profile(supabase, name, {
+            "last_submission": profile_state["submission"],
+            "last_irritation": profile_state["irritation"],
+            "last_mood":       profile_state["mood"],
+        })
+    except Exception:
+        pass
+
+    try:
+        from engine.memory import update_key_facts
+        update_key_facts(groq or primary, supabase, name)
+    except Exception:
+        pass
 
     try:
         from engine.memory import save_full_transcript
