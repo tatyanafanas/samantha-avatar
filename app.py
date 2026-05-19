@@ -466,6 +466,10 @@ if "sisterhood_active"        not in st.session_state:
     st.session_state.sisterhood_active = False
 if "gender_tier"              not in st.session_state:
     st.session_state.gender_tier = "none"
+if "prev_tier"                not in st.session_state:
+    st.session_state.prev_tier = "none"
+if "tier_intelligence"        not in st.session_state:
+    st.session_state.tier_intelligence = None
 if "recent_hook_types"        not in st.session_state:
     st.session_state.recent_hook_types = []
 
@@ -498,6 +502,18 @@ if not st.session_state.user_name:
             _update_profile(supabase, name, compressed_updates)
         st.session_state.user_profile_db = profile
         st.session_state.user_history_db = get_conversation_history(supabase, name)
+        # Seed tier from last session
+        last_tier = profile.get("last_gender_tier", "none")
+        if last_tier != "none":
+            try:
+                from engine.collective_memory import get_tier_intelligence
+                st.session_state.tier_intelligence = get_tier_intelligence(
+                    groq_client or gemini_client, supabase, last_tier
+                )
+                st.session_state.gender_tier = last_tier
+                st.session_state.prev_tier   = last_tier
+            except Exception:
+                pass
         st.rerun()
     st.stop()
 
@@ -747,6 +763,7 @@ Only include fields with clear evidence. Use null or [] for the rest.
                 st.session_state.session_id,
                 summary_text,
                 embed_client=groq_client,
+                gender_tier=st.session_state.gender_tier,
             )
 
         save_full_transcript(
@@ -1022,12 +1039,36 @@ CURRENT OBJECTIVE: {st.session_state.profile['goal']}
         gender_tier_now = detect_gender_tier(
             st.session_state.messages,
             submission_score=float(st.session_state.profile.get("submission", 0.2)),
+            prior_tier=st.session_state.gender_tier,
         )
+        tier_just_activated = (
+            gender_tier_now != st.session_state.gender_tier
+            and gender_tier_now != "none"
+        )
+        if tier_just_activated:
+            try:
+                from engine.collective_memory import get_tier_intelligence
+                st.session_state.tier_intelligence = get_tier_intelligence(
+                    groq_client or gemini_client, supabase, gender_tier_now
+                )
+            except Exception:
+                pass
+        st.session_state.prev_tier = st.session_state.gender_tier
         st.session_state.gender_tier = gender_tier_now
         st.session_state.sisterhood_active = gender_tier_now in ("sisterhood", "rival")
         tier_block = get_tier_prompt_block(gender_tier_now)
         if tier_block:
             system_prompt += f"\n---\n{tier_block}"
+        if tier_just_activated:
+            try:
+                from engine.sisterhood import get_opening_gambit
+                gambit = get_opening_gambit(gender_tier_now)
+                if gambit:
+                    system_prompt += f"\n---\nFIRST CONTACT DIRECTIVE — DEPLOY THIS MOVE NOW:\n{gambit}\n"
+            except Exception:
+                pass
+        if st.session_state.tier_intelligence:
+            system_prompt += f"\n---\nPATTERN INTELLIGENCE — PRIOR ENCOUNTERS AT THIS TIER:\n{st.session_state.tier_intelligence}\n"
         # ─────────────────────────────────────────────────────────────
 
         if contradiction_hint:
@@ -1303,5 +1344,7 @@ with col2:
         st.session_state.last_prompt            = ""
         st.session_state.sisterhood_active      = False
         st.session_state.gender_tier            = "none"
+        st.session_state.prev_tier              = "none"
+        st.session_state.tier_intelligence      = None
         st.session_state.recent_hook_types      = []
         st.rerun()

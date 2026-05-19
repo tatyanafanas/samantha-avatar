@@ -123,6 +123,8 @@ def _build_prompt(
     profile, history, profile_state, messages,
     recently_used=None, gender_tier="none",
     supabase=None, embed_client=None,
+    tier_just_activated=False,
+    tier_intelligence=None,
 ):
     try:
         from engine.memory import build_dossier_prompt, get_relevant_sessions
@@ -151,6 +153,8 @@ def _build_prompt(
         dossier,
         conversation_length=len(messages),
         gender_tier=gender_tier,
+        tier_just_activated=tier_just_activated,
+        tier_intelligence=tier_intelligence,
     )
 
 
@@ -198,6 +202,16 @@ def main():
         "_professional_count": 0,
     }
 
+    # Tier persistence: seed from last session's known tier
+    current_tier = profile.get("last_gender_tier", "none")
+    tier_intelligence = None
+    if current_tier != "none":
+        try:
+            from engine.collective_memory import get_tier_intelligence
+            tier_intelligence = get_tier_intelligence(groq or primary, supabase, current_tier)
+        except Exception:
+            pass
+
     messages = []
     recently_used = []  # rolling window for hook anti-repetition
 
@@ -228,19 +242,32 @@ def main():
 
             try:
                 from engine.sisterhood import detect_gender_tier
-                gender_tier = detect_gender_tier(
+                new_tier = detect_gender_tier(
                     messages,
                     submission_score=profile_state.get("submission", 0.0),
+                    prior_tier=current_tier,
                 )
             except Exception:
-                gender_tier = "none"
+                new_tier = "none"
+
+            tier_just_activated = new_tier != current_tier and new_tier != "none"
+            if tier_just_activated:
+                current_tier = new_tier
+                try:
+                    from engine.collective_memory import get_tier_intelligence
+                    tier_intelligence = get_tier_intelligence(groq or primary, supabase, current_tier)
+                except Exception:
+                    pass
+            gender_tier = new_tier
 
             system_prompt = _build_prompt(
                 profile, history, profile_state, messages,
                 recently_used=recently_used,
                 gender_tier=gender_tier,
                 supabase=supabase,
-                embed_client=groq,  # groq hosts the nomic embedding model
+                embed_client=groq,
+                tier_just_activated=tier_just_activated,
+                tier_intelligence=tier_intelligence,
             )
 
             reply = _chat(primary, primary_models, system_prompt, messages)
@@ -256,7 +283,7 @@ def main():
             if len(messages) % 4 == 0:
                 t = threading.Thread(
                     target=_background_extract,
-                    args=(groq or primary, supabase, name, session_id, list(messages)),
+                    args=(groq or primary, supabase, name, session_id, list(messages), current_tier),
                     daemon=True,
                 )
                 t.start()
@@ -282,15 +309,16 @@ def main():
     print("  Session ended.")
 
     # Final save
-    _background_extract(groq or primary, supabase, name, session_id, messages)
+    _background_extract(groq or primary, supabase, name, session_id, messages, current_tier)
 
     # Persist live dynamics so the next session seeds from them
     try:
         from engine.memory import update_profile
         update_profile(supabase, name, {
-            "last_submission": profile_state["submission"],
-            "last_irritation": profile_state["irritation"],
-            "last_mood":       profile_state["mood"],
+            "last_submission":  profile_state["submission"],
+            "last_irritation":  profile_state["irritation"],
+            "last_mood":        profile_state["mood"],
+            "last_gender_tier": current_tier,
         })
     except Exception:
         pass
@@ -311,7 +339,7 @@ def main():
     print(f"{'─'*55}\n")
 
 
-def _background_extract(client, supabase, name, session_id, messages):
+def _background_extract(client, supabase, name, session_id, messages, gender_tier="none"):
     if not client or not messages:
         return
     try:
@@ -349,7 +377,7 @@ Only include fields with clear evidence.
         json_text    = raw[json_start:].strip()  if json_start > 0 else None
 
         if summary_text:
-            save_session_log(supabase, name, session_id, summary_text, embed_client=client)
+            save_session_log(supabase, name, session_id, summary_text, embed_client=client, gender_tier=gender_tier)
 
         if json_text:
             try:
@@ -370,6 +398,13 @@ Only include fields with clear evidence.
                     update_profile(supabase, name, updates)
             except Exception:
                 pass
+
+        # Cross-user pattern learning: extract generalizable patterns from this session
+        try:
+            from engine.collective_memory import extract_and_save_patterns
+            extract_and_save_patterns(client, supabase, gender_tier, messages)
+        except Exception:
+            pass
 
     except Exception:
         pass

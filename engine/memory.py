@@ -285,6 +285,7 @@ def save_session_log(
     session_id: str,
     summary: str,
     embed_client=None,
+    gender_tier: str = "none",
 ):
     """
     Save a session summary to conversation_logs.
@@ -302,6 +303,7 @@ def save_session_log(
         "user_name": user_name,
         "session_id": session_id,
         "summary": summary,
+        "gender_tier": gender_tier,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -320,9 +322,10 @@ def save_session_log(
                 ).execute()
 
             supabase.table("conversation_logs").insert({
-                "user_name":  user_name,
-                "session_id": session_id,
-                "summary":    summary,
+                "user_name":   user_name,
+                "session_id":  session_id,
+                "summary":     summary,
+                "gender_tier": gender_tier,
             }).execute()
 
         except Exception as e:

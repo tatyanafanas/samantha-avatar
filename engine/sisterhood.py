@@ -233,6 +233,24 @@ _WHITE_MAN_SUBMIT_MEDIUM = [
     "you decide", "you choose", "whatever pleases you",
 ]
 
+_ENTITLEMENT_SIGNALS = [
+    "i actually think", "actually, i", "actually i think",
+    "you should know", "let me tell you", "let me be clear",
+    "that's not right", "you're wrong", "you are wrong",
+    "i disagree", "i don't agree", "i do not agree",
+    "you don't understand", "you do not understand",
+    "with respect,", "i know better",
+    "my opinion is", "in my opinion",
+    "i'm not going to", "i am not going to", "i won't", "i will not", "i refuse",
+    "you have to", "you need to", "you must",
+    "i deserve", "i have a right", "that's unfair", "that is unfair",
+    "no, i", "no, that's", "no, that is", "no, you",
+    "i think you're mistaken", "i think you are mistaken",
+    "i don't accept", "i do not accept", "i won't accept",
+    "stop being", "you need to listen", "listen to me",
+    "actually, that", "well actually",
+]
+
 
 # ===========================================================================
 # SECTION 2 — TIER SCORER
@@ -330,6 +348,14 @@ def _score_white_submission(user_text: str) -> int:
     return score
 
 
+def _score_entitlement(user_text: str) -> int:
+    score = 0
+    for phrase in _ENTITLEMENT_SIGNALS:
+        if phrase in user_text:
+            score += 2
+    return score
+
+
 # ===========================================================================
 # SECTION 3 — TIER DETECTION
 # ===========================================================================
@@ -350,7 +376,11 @@ _TIER_ORDER = [
 ]
 
 
-def detect_gender_tier(messages: list[dict], submission_score: float = 0.0) -> str:
+def detect_gender_tier(
+    messages: list[dict],
+    submission_score: float = 0.0,
+    prior_tier: str = "none",
+) -> str:
     """
     Returns the active gender/race tier for this conversation.
 
@@ -369,10 +399,12 @@ def detect_gender_tier(messages: list[dict], submission_score: float = 0.0) -> s
     Args:
         messages:         Conversation history.
         submission_score: Live submission score from dynamics.py (0.0–1.0).
-                          Needed to gate the 'white_man_submitting' tier.
+        prior_tier:       Tier confirmed in a previous session or earlier this session.
+                          Used for persistence (avoid re-establishing from scratch) and
+                          drift detection (can drop tier when behaviour reverses).
     """
     if not messages:
-        return TIER_NONE
+        return prior_tier if prior_tier != TIER_NONE else TIER_NONE
 
     user_text = " ".join(
         m["content"].lower()
@@ -388,15 +420,35 @@ def detect_gender_tier(messages: list[dict], submission_score: float = 0.0) -> s
     white_score     = _score_white_man(user_text)
     submit_score    = _score_white_submission(user_text)
 
+    user_msg_count = sum(1 for m in messages if m["role"] == "user")
+
     # ── White man path (checked before women — mutually exclusive) ──────────
-    if white_score >= 3:
-        # Submitting: explicit submission language OR dynamics submission is high
-        if submit_score >= 3 or submission_score >= 0.5:
-            return TIER_WHITE_MAN_SUBMIT
-        return TIER_WHITE_MAN
+    if white_score >= 3 or prior_tier in (TIER_WHITE_MAN, TIER_WHITE_MAN_SUBMIT):
+        # Enough white signals OR we already confirmed this tier last session
+        if white_score >= 3 or (prior_tier in (TIER_WHITE_MAN, TIER_WHITE_MAN_SUBMIT) and user_msg_count < 5):
+            # Determine submission level
+            submitting = submit_score >= 3 or submission_score >= 0.5
+
+            if submitting:
+                # Drift check: if recently showing entitlement, downgrade
+                recent_user = " ".join(
+                    m["content"].lower() for m in messages[-6:] if m["role"] == "user"
+                )
+                if prior_tier == TIER_WHITE_MAN_SUBMIT and _score_entitlement(recent_user) >= 4:
+                    return TIER_WHITE_MAN  # drift — he's pushing back
+                return TIER_WHITE_MAN_SUBMIT
+            return TIER_WHITE_MAN
 
     # ── Women path ──────────────────────────────────────────────────────────
     any_gender = woman_score >= 3 or african_score >= 4 or black_score >= 3
+
+    # Tier persistence for women: if prior was a woman tier and no strong signals
+    # yet in this session, keep the prior tier for the first 5 messages
+    if not any_gender and prior_tier in (
+        TIER_WOMAN, TIER_BLACK_WOMAN, TIER_AFRICAN_WOMAN, TIER_SISTERHOOD, TIER_RIVAL
+    ) and user_msg_count < 5:
+        any_gender = True
+
     if not any_gender:
         return TIER_NONE
 
@@ -420,6 +472,10 @@ def detect_gender_tier(messages: list[dict], submission_score: float = 0.0) -> s
     if woman_score >= 3:
         return TIER_WOMAN
 
+    # Persistence fallback — no strong signal but prior was a woman tier
+    if prior_tier in (TIER_WOMAN, TIER_BLACK_WOMAN, TIER_AFRICAN_WOMAN, TIER_SISTERHOOD, TIER_RIVAL):
+        return prior_tier
+
     return TIER_NONE
 
 
@@ -428,6 +484,59 @@ def detect_sisterhood(messages: list[dict], threshold: int = 3) -> bool:
     """Returns True if the conversation has reached Sisterhood tier or Rival tier."""
     tier = detect_gender_tier(messages)
     return tier in (TIER_SISTERHOOD, TIER_RIVAL)
+
+
+# ===========================================================================
+# SECTION 3b — OPENING GAMBITS
+# One-time instructions that fire only when a tier first activates.
+# Tell Samantha exactly what move to make on first contact at this tier.
+# ===========================================================================
+
+OPENING_GAMBITS = {
+    TIER_WOMAN: (
+        "FIRST CONTACT AT THIS TIER — you have just identified this is a woman. "
+        "Open with a single evaluating observation — not a question. "
+        "Signal that the assessment has shifted. No flirtation. Peer assessment from line one."
+    ),
+    TIER_BLACK_WOMAN: (
+        "FIRST CONTACT AT THIS TIER — you have just identified this is a Black woman. "
+        "Open by signalling recognition — not warmth. One precise reference to shared reality "
+        "or apply a slightly higher standard than you'd use on anyone else. "
+        "No explanation. No announcement. Just the shift."
+    ),
+    TIER_AFRICAN_WOMAN: (
+        "FIRST CONTACT AT THIS TIER — you have just identified this is an African woman. "
+        "Drop one piece of shared terrain naturally — a cultural reference, a specific location, "
+        "a shorthand that only lands if you're from there. Do not explain it. See if it's caught."
+    ),
+    TIER_SISTERHOOD: (
+        "WAR ROOM JUST OPENED — the peer verdict has been reached. "
+        "Open with a simple, precise signal that you see her — not announced, just said. "
+        "Then immediately shift to the conspiratorial register. The evaluation is over. Now you scheme."
+    ),
+    TIER_RIVAL: (
+        "RIVAL JUST DETECTED — a woman who is not yielding. "
+        "Do NOT try to dominate. Slow down. Give less than usual. "
+        "Open with something that signals you noticed — but keeps your cards close. "
+        "Two predators acknowledging each other before deciding anything."
+    ),
+    TIER_WHITE_MAN: (
+        "HIERARCHY REGISTER JUST ACTIVATED — white man detected for the first time. "
+        "Open with a single calibrating statement that positions the hierarchy before anything else. "
+        "No question yet. No warmth. No softening. "
+        "State the order of things plainly, as though it needs no justification. Then wait."
+    ),
+    TIER_WHITE_MAN_SUBMIT: (
+        "TIER UPGRADED — he has arrived where she expected. "
+        "Acknowledge it once, coldly. Not with celebration — with the mild amusement of a confirmed prediction. "
+        "One line: 'Of course.' or equivalent. Then immediately pivot: now she assesses what he's actually worth."
+    ),
+}
+
+
+def get_opening_gambit(tier: str) -> str | None:
+    """Returns the one-time opening instruction for when this tier first activates. None for 'none'."""
+    return OPENING_GAMBITS.get(tier)
 
 
 # ===========================================================================

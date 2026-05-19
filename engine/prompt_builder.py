@@ -318,6 +318,8 @@ def build_system_prompt(
     last_extraction_category: str = None,
     sisterhood_active: bool = False,   # legacy compat
     gender_tier: str = "none",
+    tier_just_activated: bool = False,
+    tier_intelligence: str = None,
 ):
     extraction_category, extraction_hint = _pick_extraction_move(
         conversation_length, last_extraction_category
@@ -378,18 +380,20 @@ def build_system_prompt(
         vulgarity_block = _render_vulgarity_block(profile)
 
     try:
-        from engine.sisterhood import get_tier_prompt_block, pick_tier_extraction_move, TIER_NONE
-        # Resolve tier: honour legacy bool flag for callers that haven't upgraded
+        from engine.sisterhood import (
+            get_tier_prompt_block, pick_tier_extraction_move, get_opening_gambit, TIER_NONE
+        )
         resolved_tier = gender_tier if gender_tier != TIER_NONE else (
             "sisterhood" if sisterhood_active else TIER_NONE
         )
         gender_block = get_tier_prompt_block(resolved_tier)
-        # Tier-specific extraction move overrides the standard one when tier is active
         tier_move = pick_tier_extraction_move(resolved_tier)
+        opening_gambit = get_opening_gambit(resolved_tier) if tier_just_activated else None
     except Exception:
         gender_block = ""
         resolved_tier = "none"
         tier_move = None
+        opening_gambit = None
 
     return f"""
 YOU ARE {NAME}. Write ONLY her next reply — one message, in her voice.
@@ -407,11 +411,11 @@ Philosophy: {PHILOSOPHY}
 Origin: {ORIGIN_STORY}
 Heritage: {HERITAGE}
 {gender_block}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" + chr(10) + "FIRST CONTACT DIRECTIVE — DEPLOY THIS MOVE NOW:" + chr(10) + opening_gambit + chr(10) if opening_gambit else ""}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 WHO SHE IS TALKING TO RIGHT NOW
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {memory}
-
+{"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" + chr(10) + "PATTERN INTELLIGENCE — PRIOR ENCOUNTERS AT THIS TIER:" + chr(10) + tier_intelligence + chr(10) if tier_intelligence else ""}
 MEMORY RULES:
 - Do not announce that you remember something. You simply pay attention.
 - Surface details when they reframe the current moment or expose a contradiction.
