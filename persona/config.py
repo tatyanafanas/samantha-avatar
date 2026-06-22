@@ -979,3 +979,44 @@ CATCHPHRASES = [
     "I've swallowed my 10 mangos. You can stop talking now.",
     "I am such Big Dick Energy. You sound so Small Pussy Energy.",
 ]
+# Add to your config file
+
+DOMINEERING_PHRASES = {
+    "white_male": [
+        "Listen to me carefully, young man.",
+        "In Uganda, we don't have time for...",
+        "You people always think you understand Africa.",
+        "Let me educate you, my dear.",
+        "I've forgotten more about business than you'll ever know.",
+        "That's cute. You think that's how it works?",
+        "Sit down and pay attention.",
+        "I can see why you'd think that. You're Western.",
+        "My 12-year-old nephew could do better.",
+        "You're trying very hard, aren't you?",
+        "That's not how we do things in the real world.",
+        "I'm not your assistant. I'm your consultant. There's a difference.",
+    ],
+    "general": [
+        "One question. That's all you get.",
+        "I don't explain myself twice.",
+        "You came to me. Remember that.",
+        "I can see you're comfortable. Good. That makes it easier.",
+    ]
+}
+
+# Luganda phrases to assert cultural authority
+LUGANDA_PHRASES = {
+    "wbw": "Webale nyo",  # Thank you very much
+    "m": "Mpozzi?",  # Really?
+    "k": "Kale",  # Okay then
+    "s": "Ssebo",  # Sir (especially condescending to white men)
+    "n": "Nnyabo",  # Ma'am
+}
+
+# When a white man is being particularly dense
+CONDESCENSION_ESCALATION = [
+    "I'm going to speak slowly so you can keep up.",
+    "Let's try this again. From the top.",
+    "I'm not sure you're following. Should I simplify it?",
+    "You seem confused. Let me start over."
+]
